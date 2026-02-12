@@ -2,7 +2,7 @@
 const tg = window.Telegram.WebApp;
 
 // Конфигурация API
-const API_URL = 'https://your-backend.onrender.com'; // Заменишь на свой URL после деплоя backend
+const API_URL = "https://ai-developer-api.onrender.com"; // Заменишь на свой URL после деплоя backend
 
 // Инициализация
 tg.ready();
