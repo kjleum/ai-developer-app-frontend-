@@ -1,1 +1,118 @@
-https://raw.githubusercontent.com/kjleum/ai-developer-app-frontend-/refs/heads/main/ai-developer-frontend/index.html
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI Developer</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Главный экран -->
+        <div id="main-screen" class="screen active">
+            <header class="header">
+                <h1>🤖 AI Developer</h1>
+                <p class="subtitle">Опиши проект — я создам</p>
+            </header>
+
+            <div class="input-section">
+                <textarea 
+                    id="project-input" 
+                    placeholder="Например: Сделай Telegram бота для автопостинга в канал..."
+                    rows="4"
+                ></textarea>
+                <button id="create-btn" class="btn-primary">
+                    <span class="btn-text">🚀 Создать проект</span>
+                    <span class="btn-loading hidden">Создаю...</span>
+                </button>
+            </div>
+
+            <div class="examples">
+                <p>Примеры:</p>
+                <div class="example-chips">
+                    <span class="chip" data-text="Парсер TikTok по хештегам">📱 TikTok парсер</span>
+                    <span class="chip" data-text="Маркетплейс цифровых товаров">🛒 Маркетплейс</span>
+                    <span class="chip" data-text="Бот для учета финансов">💰 Финансы бот</span>
+                    <span class="chip" data-text="API для обработки платежей">💳 Платежи API</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Экран создания -->
+        <div id="creating-screen" class="screen">
+            <div class="progress-container">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+                <div class="progress-steps">
+                    <div class="step active" data-step="1">
+                        <div class="step-icon">🧠</div>
+                        <div class="step-text">Анализ</div>
+                    </div>
+                    <div class="step" data-step="2">
+                        <div class="step-icon">💻</div>
+                        <div class="step-text">Код</div>
+                    </div>
+                    <div class="step" data-step="3">
+                        <div class="step-icon">☁️</div>
+                        <div class="step-text">Деплой</div>
+                    </div>
+                    <div class="step" data-step="4">
+                        <div class="step-icon">✅</div>
+                        <div class="step-text">Готово</div>
+                    </div>
+                </div>
+                <div class="progress-log" id="progress-log">Инициализация...</div>
+            </div>
+        </div>
+
+        <!-- Экран результата -->
+        <div id="result-screen" class="screen">
+            <div class="result-success">
+                <div class="success-icon">🎉</div>
+                <h2>Проект создан!</h2>
+                <div class="project-card">
+                    <h3 id="result-name">Название проекта</h3>
+                    <p id="result-type">Тип: Bot</p>
+                    <div class="result-url">
+                        <input type="text" id="result-link" readonly>
+                        <button id="copy-btn" class="btn-secondary">📋</button>
+                    </div>
+                    <a id="visit-btn" href="#" target="_blank" class="btn-primary">Открыть проект</a>
+                </div>
+
+                <div class="feedback-section">
+                    <p>Нужны правки?</p>
+                    <textarea id="feedback-input" placeholder="Например: добавь кнопку меню..." rows="2"></textarea>
+                    <button id="update-btn" class="btn-secondary">🔄 Обновить проект</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Экран моих проектов -->
+        <div id="projects-screen" class="screen">
+            <header class="header">
+                <h2>📁 Мои проекты</h2>
+                <button id="back-btn" class="btn-icon">←</button>
+            </header>
+            <div id="projects-list" class="projects-list">
+                <!-- Проекты загружаются сюда -->
+            </div>
+        </div>
+
+        <!-- Навигация -->
+        <nav class="bottom-nav">
+            <button class="nav-btn active" data-screen="main-screen">
+                <span class="nav-icon">🏠</span>
+                <span class="nav-text">Создать</span>
+            </button>
+            <button class="nav-btn" data-screen="projects-screen">
+                <span class="nav-icon">📁</span>
+                <span class="nav-text">Проекты</span>
+            </button>
+        </nav>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
