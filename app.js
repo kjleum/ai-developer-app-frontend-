@@ -1,7 +1,6 @@
-// Конфигурация
+// AI Developer Platform v4.0 - Frontend
 const CONFIG = {
-    API_URL: 'https://ai-developer-api.onrender.com',
-    TELEGRAM_MODE: true
+    API_URL: 'https://ai-developer-api.onrender.com' // Замените на ваш URL
 };
 
 // Состояние приложения
@@ -9,504 +8,230 @@ const state = {
     user: null,
     currentStep: 1,
     projectConfig: {
+        type: '',
         name: '',
         description: '',
-        type: 'api',
         features: [],
-        database: 'none',
-        frontend: 'none',
-        authentication: false,
-        admin_panel: false,
-        api_documentation: true,
-        tests: false,
-        docker: false,
-        ai_settings: {
-            provider: 'groq',
-            model: null,
-            temperature: 0.7,
-            max_tokens: 4000
-        },
-        auto_deploy: true,
-        platform: 'render'
+        database: 'postgresql',
+        ai_provider: ''
     },
-    aiProviders: [],
+    providers: [],
     examples: []
 };
 
 // Инициализация
-document.addEventListener('DOMContentLoaded', async () => {
+document.addEventListener('DOMContentLoaded', () => {
     initTelegram();
-    await loadData();
+    loadData();
     setupEventListeners();
-    showScreen('main-screen');
 });
 
-// Telegram WebApp
 function initTelegram() {
     if (window.Telegram?.WebApp) {
         const tg = window.Telegram.WebApp;
         tg.ready();
         tg.expand();
+        tg.setHeaderColor('#0a0a1a');
+        tg.setBackgroundColor('#0a0a1a');
 
         state.user = {
-            id: tg.initDataUnsafe?.user?.id?.toString() || 'demo_user',
+            id: tg.initDataUnsafe?.user?.id?.toString() || 'demo_' + Date.now(),
             username: tg.initDataUnsafe?.user?.username || 'demo'
         };
-
-        tg.setHeaderColor('#0f0f23');
-        tg.setBackgroundColor('#0f0f23');
     } else {
-        state.user = { id: 'web_user_' + Date.now(), username: 'web_user' };
+        state.user = { id: 'web_' + Date.now(), username: 'web_user' };
     }
 }
 
-// Загрузка данных
 async function loadData() {
+    await Promise.all([
+        loadProviders(),
+        loadExamples(),
+        loadProjects()
+    ]);
+}
+
+async function loadProviders() {
     try {
-        const providersRes = await fetch(`${CONFIG.API_URL}/ai/providers`);
-        const providersData = await providersRes.json();
-        state.aiProviders = providersData.providers;
-
-        const recommended = state.aiProviders.find(p => p.recommended && p.available);
-        if (recommended) {
-            state.projectConfig.ai_settings.provider = recommended.id;
-        }
-
-        await loadExamples();
-        await loadUserProjects();
-
-    } catch (error) {
-        console.error('Ошибка загрузки:', error);
+        const res = await fetch(`${CONFIG.API_URL}/ai/providers`);
+        const data = await res.json();
+        state.providers = data.providers || [];
+        renderProviders();
+        document.getElementById('ai-count').textContent = 
+            state.providers.filter(p => p.available).length + '+';
+    } catch (e) {
+        console.error('Failed to load providers:', e);
     }
+}
+
+function renderProviders() {
+    const container = document.getElementById('providers-list');
+    if (!container) return;
+
+    const available = state.providers.filter(p => p.available);
+
+    container.innerHTML = available.slice(0, 4).map(p => `
+        <div class="provider-card available">
+            <div class="provider-name">${p.name}</div>
+            <div class="provider-status">${p.speed}</div>
+        </div>
+    `).join('') || '<p class="empty-state">Нет доступных провайдеров</p>';
 }
 
 async function loadExamples() {
     try {
         const res = await fetch(`${CONFIG.API_URL}/examples`);
         const data = await res.json();
-        state.examples = data.examples;
+        state.examples = data.examples || [];
         renderExamples();
-    } catch (error) {
-        console.error('Ошибка загрузки примеров:', error);
+    } catch (e) {
+        console.error('Failed to load examples:', e);
     }
 }
 
-async function loadUserProjects() {
+function renderExamples() {
+    const container = document.getElementById('examples-grid');
+    if (!container) return;
+
+    container.innerHTML = state.examples.map(ex => `
+        <div class="example-card" onclick="useExample('${ex.id}')">
+            <h3>${ex.icon} ${ex.title}</h3>
+            <p>${ex.description}</p>
+        </div>
+    `).join('');
+}
+
+async function loadProjects() {
     try {
         const res = await fetch(`${CONFIG.API_URL}/projects?user_id=${state.user.id}`);
         const data = await res.json();
-        renderProjects(data.projects);
-    } catch (error) {
-        console.error('Ошибка загрузки проектов:', error);
+        renderProjects(data.projects || []);
+    } catch (e) {
+        console.error('Failed to load projects:', e);
     }
 }
 
-// Рендер примеров
-function renderExamples() {
-    const container = document.getElementById('examples-grid');
-    container.innerHTML = state.examples.map(example => `
-        <div class="example-card" onclick="useExample('${example.id}')">
-            <div class="icon">${example.icon}</div>
-            <h3>${example.title}</h3>
-            <p>${example.description}</p>
-        </div>
-    `).join('');
-}
-
-// Рендер проектов
 function renderProjects(projects) {
     const container = document.getElementById('projects-list');
+    if (!container) return;
 
-    if (!projects || projects.length === 0) {
-        container.innerHTML = '<p class="empty-state">Пока нет проектов. Создайте первый!</p>';
+    if (projects.length === 0) {
+        container.innerHTML = '<p class="empty-state">Нет проектов. Создайте первый!</p>';
         return;
     }
 
-    const icons = { api: '🔌', bot: '🤖', frontend: '🎨', scraper: '🔍', fullstack: '⚡', cli: '⌨️' };
-
-    container.innerHTML = projects.map(project => `
-        <div class="project-item" onclick="viewProject('${project.id}')">
-            <div class="project-icon">${icons[project.config?.type] || '📦'}</div>
+    container.innerHTML = projects.map(p => `
+        <div class="project-item" onclick="viewProject('${p.id}')">
+            <div class="project-icon">📦</div>
             <div class="project-info">
-                <h4>${project.config?.name || 'Без названия'}</h4>
-                <p>${project.config?.type || 'unknown'} • ${formatDate(project.created_at)}</p>
+                <h4>${p.config?.name || 'Без названия'}</h4>
+                <p>${p.status} • ${new Date(p.created_at).toLocaleDateString()}</p>
             </div>
-            <span class="project-status status-${project.status}">${project.status}</span>
         </div>
     `).join('');
 }
 
-// Использовать пример
-function useExample(exampleId) {
-    const example = state.examples.find(e => e.id === exampleId);
-    if (!example) return;
-
-    state.projectConfig = {
-        ...state.projectConfig,
-        ...example.config_preview,
-        name: example.title.replace(/[^\w\s]/g, '').trim(),
-        description: example.description
-    };
-
-    state.currentStep = 4;
-    openWizard();
+// Navigation
+function showScreen(screenId) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(screenId).classList.add('active');
+    window.scrollTo(0, 0);
 }
 
-// Мастер создания проекта
+// Wizard
 function openWizard() {
-    showScreen('wizard-screen');
+    state.currentStep = 1;
+    state.projectConfig = { type: '', name: '', description: '', features: [], database: 'postgresql', ai_provider: '' };
     updateWizardStep();
-    renderAIProviders();
+    showScreen('wizard-screen');
+}
+
+function selectProjectType(type) {
+    state.projectConfig.type = type;
+    document.querySelectorAll('.type-card').forEach(c => c.classList.remove('selected'));
+    document.querySelector(`.type-card[data-type="${type}"]`)?.classList.add('selected');
 }
 
 function updateWizardStep() {
-    document.querySelectorAll('.step-indicator').forEach((el, idx) => {
-        el.classList.toggle('active', idx + 1 === state.currentStep);
+    document.querySelectorAll('.step').forEach((s, i) => {
+        s.classList.toggle('active', i + 1 === state.currentStep);
     });
 
-    document.querySelectorAll('.wizard-step').forEach((el, idx) => {
-        el.classList.toggle('active', idx + 1 === state.currentStep);
+    document.querySelectorAll('.wizard-step-content').forEach((c, i) => {
+        c.classList.toggle('active', i + 1 === state.currentStep);
     });
 
-    if (state.currentStep === 4) {
-        updateSummary();
+    document.getElementById('prev-step').style.display = state.currentStep > 1 ? 'block' : 'none';
+    document.getElementById('next-step').textContent = state.currentStep === 4 ? '✨ Создать' : 'Далее →';
+}
+
+function nextStep() {
+    if (state.currentStep === 1 && !state.projectConfig.type) {
+        alert('Выберите тип проекта');
+        return;
+    }
+    if (state.currentStep === 2) {
+        state.projectConfig.name = document.getElementById('project-name').value;
+        state.projectConfig.description = document.getElementById('project-description').value;
+        if (!state.projectConfig.name || !state.projectConfig.description) {
+            alert('Заполните название и описание');
+            return;
+        }
+    }
+
+    if (state.currentStep < 4) {
+        state.currentStep++;
+        updateWizardStep();
+        if (state.currentStep === 4) updateSummary();
+    } else {
+        createProject();
+    }
+}
+
+function prevStep() {
+    if (state.currentStep > 1) {
+        state.currentStep--;
+        updateWizardStep();
     }
 }
 
 function updateSummary() {
-    const container = document.getElementById('config-summary');
-    const typeNames = { api: 'REST API', bot: 'Бот', frontend: 'Frontend', scraper: 'Парсер', fullstack: 'Fullstack', cli: 'CLI' };
-
-    container.innerHTML = `
-        <div class="summary-item">
-            <span>Название:</span>
-            <strong>${state.projectConfig.name || 'Не указано'}</strong>
-        </div>
-        <div class="summary-item">
-            <span>Тип:</span>
-            <strong>${typeNames[state.projectConfig.type]}</strong>
-        </div>
-        <div class="summary-item">
-            <span>Функций:</span>
-            <strong>${state.projectConfig.features.length}</strong>
-        </div>
-        <div class="summary-item">
-            <span>База данных:</span>
-            <strong>${state.projectConfig.database}</strong>
-        </div>
-        <div class="summary-item">
-            <span>AI провайдер:</span>
-            <strong>${state.aiProviders.find(p => p.id === state.projectConfig.ai_settings.provider)?.name || 'Auto'}</strong>
-        </div>
-    `;
-}
-
-// Рендер AI провайдеров
-function renderAIProviders() {
-    const container = document.getElementById('ai-providers');
-
-    container.innerHTML = state.aiProviders.map(provider => `
-        <div class="ai-provider-card ${provider.available ? '' : 'unavailable'} ${provider.id === state.projectConfig.ai_settings.provider ? 'selected' : ''}" 
-             onclick="${provider.available ? `selectAIProvider('${provider.id}')` : ''}">
-            <div class="provider-icon">
-                ${provider.id === 'groq' ? '⚡' : provider.id === 'gemini' ? '🧠' : provider.id === 'openai' ? '🔮' : '📦'}
-            </div>
-            <div class="provider-info">
-                <span class="provider-name">${provider.name}</span>
-                <span class="provider-meta">${provider.speed} • ${provider.limits}</span>
-            </div>
-            ${provider.recommended ? '<span class="provider-badge badge-recommended">Рекомендуем</span>' : ''}
-            ${!provider.available ? '<span class="provider-badge badge-paid">Нет ключа</span>' : 
-              provider.cost === 'Бесплатно' ? '<span class="provider-badge badge-free">Бесплатно</span>' : 
-              '<span class="provider-badge badge-paid">Платно</span>'}
-        </div>
-    `).join('');
-
-    updateModelsList();
-}
-
-function selectAIProvider(providerId) {
-    state.projectConfig.ai_settings.provider = providerId;
-    renderAIProviders();
-    updateModelsList();
-}
-
-function updateModelsList() {
-    const provider = state.aiProviders.find(p => p.id === state.projectConfig.ai_settings.provider);
-    const select = document.getElementById('ai-model');
-    const group = document.getElementById('model-select-group');
-
-    if (!provider || provider.models.length <= 1) {
-        group.style.display = 'none';
-        return;
-    }
-
-    group.style.display = 'block';
-    select.innerHTML = `
-        <option value="">Автовыбор (${provider.default_model})</option>
-        ${provider.models.map(m => `<option value="${m}">${m}</option>`).join('')}
-    `;
-}
-
-// Создание проекта
-async function createProject() {
-    if (!validateConfig()) return;
-
-    showScreen('generating-screen');
-    updateGeneratingStatus('analyze', 'active');
-
-    try {
-        const response = await fetch(`${CONFIG.API_URL}/projects`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user_id: state.user.id,
-                config: state.projectConfig
-            })
-        });
-
-        const data = await response.json();
-
-        if (!data.success) {
-            throw new Error(data.detail || 'Ошибка создания');
-        }
-
-        await simulateProgress();
-        const project = await pollProjectStatus(data.project_id);
-        showResult(project);
-
-    } catch (error) {
-        console.error('Ошибка:', error);
-        alert(error.message);
-        showScreen('main-screen');
+    const summary = document.getElementById('project-summary');
+    if (summary) {
+        summary.innerHTML = `
+            <div class="summary-item"><span>Тип:</span> <strong>${state.projectConfig.type}</strong></div>
+            <div class="summary-item"><span>Название:</span> <strong>${state.projectConfig.name}</strong></div>
+            <div class="summary-item"><span>Функций:</span> <strong>${state.projectConfig.features.length}</strong></div>
+            <div class="summary-item"><span>База данных:</span> <strong>${state.projectConfig.database}</strong></div>
+        `;
     }
 }
 
-async function simulateProgress() {
-    const steps = [
-        { id: 'analyze', delay: 2000, next: 'architecture' },
-        { id: 'architecture', delay: 3000, next: 'code' },
-        { id: 'code', delay: 5000, next: 'deploy' },
-        { id: 'deploy', delay: 4000, next: null }
-    ];
-
-    for (const step of steps) {
-        await new Promise(r => setTimeout(r, step.delay));
-
-        const el = document.getElementById(`step-${step.id}`);
-        if (el) {
-            el.classList.add('completed');
-            el.classList.remove('active');
-        }
-
-        if (step.next) {
-            const nextEl = document.getElementById(`step-${step.next}`);
-            if (nextEl) nextEl.classList.add('active');
-        }
-
-        updateGeneratingStatus(step.id, 'completed');
-    }
-}
-
-async function pollProjectStatus(projectId) {
-    await new Promise(r => setTimeout(r, 2000));
-    const res = await fetch(`${CONFIG.API_URL}/projects/${projectId}?user_id=${state.user.id}`);
-    return await res.json();
-}
-
-function updateGeneratingStatus(step, status) {
-    const messages = {
-        analyze: 'Анализируем требования...',
-        architecture: 'Проектируем архитектуру...',
-        code: 'Генерируем код...',
-        deploy: 'Деплоим на сервер...'
-    };
-
-    const el = document.getElementById('generating-status');
-    if (el) el.textContent = messages[step] || 'Обработка...';
-}
-
-// Показ результата
-function showResult(project) {
-    showScreen('result-screen');
-
-    document.getElementById('result-name').textContent = project.config.name;
-    document.getElementById('result-deploy-url').href = project.deploy_url || '#';
-    document.getElementById('deploy-url-text').textContent = project.deploy_url || 'Не развёрнут';
-    document.getElementById('result-github-url').href = project.github_url || '#';
-
-    const filesContainer = document.getElementById('files-list');
-    const files = Object.keys(project.files || {});
-    filesContainer.innerHTML = files.map(f => `<span class="file-tag">${f}</span>`).join('');
-}
-
-// Валидация
-function validateConfig() {
-    if (!state.projectConfig.name.trim()) {
-        alert('Введите название проекта');
-        state.currentStep = 1;
-        updateWizardStep();
-        return false;
-    }
-
-    if (!state.projectConfig.description.trim()) {
-        alert('Введите описание проекта');
-        state.currentStep = 1;
-        updateWizardStep();
-        return false;
-    }
-
-    return true;
-}
-
-// Навигация
-function showScreen(screenId) {
-    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-    document.getElementById(screenId).classList.add('active');
-}
-
-// Event Listeners
-function setupEventListeners() {
-    document.getElementById('create-project-btn').addEventListener('click', () => {
-        state.currentStep = 1;
-        state.projectConfig = getDefaultConfig();
-        openWizard();
-    });
-
-    document.getElementById('refresh-examples').addEventListener('click', loadExamples);
-    document.getElementById('wizard-back').addEventListener('click', () => showScreen('main-screen'));
-
-    document.querySelectorAll('.btn-next').forEach(btn => {
-        btn.addEventListener('click', () => {
-            state.currentStep = parseInt(btn.dataset.next);
-            updateWizardStep();
-        });
-    });
-
-    document.querySelectorAll('.btn-prev').forEach(btn => {
-        btn.addEventListener('click', () => {
-            state.currentStep = parseInt(btn.dataset.prev);
-            updateWizardStep();
-        });
-    });
-
-    document.querySelectorAll('.type-card').forEach(card => {
-        card.addEventListener('click', () => {
-            document.querySelectorAll('.type-card').forEach(c => c.classList.remove('selected'));
-            card.classList.add('selected');
-            state.projectConfig.type = card.dataset.value;
-
-            const frontendSection = document.getElementById('frontend-section');
-            frontendSection.style.display = card.dataset.value === 'fullstack' ? 'block' : 'none';
-        });
-    });
-
-    document.getElementById('project-name').addEventListener('input', (e) => {
-        state.projectConfig.name = e.target.value;
-    });
-
-    document.getElementById('project-description').addEventListener('input', (e) => {
-        state.projectConfig.description = e.target.value;
-    });
-
-    document.getElementById('add-feature').addEventListener('click', addFeature);
-
-    document.querySelectorAll('.quick-tags .tag').forEach(tag => {
-        tag.addEventListener('click', () => {
-            document.getElementById('feature-name').value = tag.dataset.feature;
-            document.getElementById('feature-desc').focus();
-        });
-    });
-
-    document.querySelectorAll('#database-select .tech-card').forEach(card => {
-        card.addEventListener('click', () => {
-            document.querySelectorAll('#database-select .tech-card').forEach(c => c.classList.remove('active'));
-            card.classList.add('active');
-            state.projectConfig.database = card.dataset.value;
-        });
-    });
-
-    document.querySelectorAll('#frontend-select .tech-card').forEach(card => {
-        card.addEventListener('click', () => {
-            document.querySelectorAll('#frontend-select .tech-card').forEach(c => c.classList.remove('active'));
-            card.classList.add('active');
-            state.projectConfig.frontend = card.dataset.value;
-        });
-    });
-
-    ['auth', 'admin', 'docs', 'tests', 'docker'].forEach(opt => {
-        document.getElementById(`opt-${opt}`).addEventListener('change', (e) => {
-            const key = opt === 'auth' ? 'authentication' : opt === 'admin' ? 'admin_panel' : opt === 'docs' ? 'api_documentation' : opt;
-            state.projectConfig[key] = e.target.checked;
-        });
-    });
-
-    document.getElementById('ai-temperature').addEventListener('input', (e) => {
-        const val = e.target.value / 100;
-        state.projectConfig.ai_settings.temperature = val;
-        document.getElementById('temp-value').textContent = val.toFixed(1);
-    });
-
-    document.getElementById('ai-model').addEventListener('change', (e) => {
-        state.projectConfig.ai_settings.model = e.target.value || null;
-    });
-
-    document.querySelectorAll('input[name="deploy"]').forEach(radio => {
-        radio.addEventListener('change', (e) => {
-            state.projectConfig.auto_deploy = e.target.value === 'render';
-            document.querySelectorAll('.radio-card').forEach(c => c.classList.remove('active'));
-            e.target.closest('.radio-card').classList.add('active');
-        });
-    });
-
-    document.getElementById('create-final-btn').addEventListener('click', createProject);
-
-    document.getElementById('new-project-btn').addEventListener('click', () => {
-        state.currentStep = 1;
-        state.projectConfig = getDefaultConfig();
-        openWizard();
-    });
-
-    document.getElementById('view-projects-btn').addEventListener('click', () => {
-        showScreen('main-screen');
-        loadUserProjects();
-    });
-}
-
-// Добавление функции
 function addFeature() {
-    const name = document.getElementById('feature-name').value.trim();
-    const desc = document.getElementById('feature-desc').value.trim();
+    const name = document.getElementById('feature-name').value;
     const priority = document.getElementById('feature-priority').value;
 
-    if (!name) {
-        alert('Введите название функции');
-        return;
+    if (name) {
+        state.projectConfig.features.push({ name, priority });
+        renderFeatures();
+        document.getElementById('feature-name').value = '';
     }
+}
 
-    state.projectConfig.features.push({ name, description: desc, priority });
+function quickAddFeature(name) {
+    state.projectConfig.features.push({ name, priority: 'should' });
     renderFeatures();
-
-    document.getElementById('feature-name').value = '';
-    document.getElementById('feature-desc').value = '';
 }
 
 function renderFeatures() {
     const container = document.getElementById('features-list');
+    if (!container) return;
 
-    if (state.projectConfig.features.length === 0) {
-        container.innerHTML = '';
-        return;
-    }
-
-    container.innerHTML = state.projectConfig.features.map((f, idx) => `
+    container.innerHTML = state.projectConfig.features.map((f, i) => `
         <div class="feature-item">
-            <span class="feature-priority priority-${f.priority}">${f.priority}</span>
-            <div style="flex: 1;">
-                <div class="feature-name">${f.name}</div>
-                ${f.description ? `<div class="feature-desc">${f.description}</div>` : ''}
-            </div>
-            <button class="btn-delete" onclick="removeFeature(${idx})">🗑️</button>
+            <span class="feature-priority ${f.priority}">${f.priority}</span>
+            <span class="feature-name">${f.name}</span>
+            <button class="feature-delete" onclick="removeFeature(${i})">×</button>
         </div>
     `).join('');
 }
@@ -516,36 +241,333 @@ function removeFeature(index) {
     renderFeatures();
 }
 
-// Утилиты
-function getDefaultConfig() {
-    return {
-        name: '',
-        description: '',
-        type: 'api',
-        features: [],
-        database: 'none',
-        frontend: 'none',
-        authentication: false,
-        admin_panel: false,
-        api_documentation: true,
-        tests: false,
-        docker: false,
-        ai_settings: {
-            provider: state.aiProviders.find(p => p.recommended && p.available)?.id || 'mock',
-            model: null,
-            temperature: 0.7,
-            max_tokens: 4000
-        },
-        auto_deploy: true,
-        platform: 'render'
-    };
+async function createProject() {
+    showScreen('generating-screen');
+
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/projects`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_id: state.user.id,
+                config: state.projectConfig
+            })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+            // Симулируем прогресс
+            await simulateProgress();
+            showResult(data.project_id);
+        } else {
+            throw new Error(data.detail || 'Failed to create project');
+        }
+    } catch (e) {
+        alert('Ошибка: ' + e.message);
+        showScreen('main-screen');
+    }
 }
 
-function formatDate(dateString) {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+async function simulateProgress() {
+    const steps = ['analyze', 'architecture', 'code', 'deploy'];
+    const delays = [1500, 2000, 4000, 3000];
+
+    for (let i = 0; i < steps.length; i++) {
+        document.querySelectorAll('.progress-step').forEach((s, j) => {
+            if (j < i) s.classList.add('completed');
+            else if (j === i) s.classList.add('active');
+        });
+        await new Promise(r => setTimeout(r, delays[i]));
+    }
 }
 
-function viewProject(projectId) {
-    console.log('View project:', projectId);
+async function showResult(projectId) {
+    showScreen('result-screen');
+
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/projects/${projectId}?user_id=${state.user.id}`);
+        const project = await res.json();
+
+        document.getElementById('result-project-name').textContent = project.config?.name || 'Project';
+
+        if (project.deploy_url) {
+            document.getElementById('result-deploy-url').href = project.deploy_url;
+            document.getElementById('deploy-url-text').textContent = project.deploy_url;
+        }
+        if (project.github_url) {
+            document.getElementById('result-github-url').href = project.github_url;
+        }
+
+        const files = Object.keys(project.files || {});
+        document.getElementById('files-list').innerHTML = files.map(f => 
+            `<span class="file-tag">${f}</span>`
+        ).join('');
+    } catch (e) {
+        console.error('Failed to load project:', e);
+    }
+}
+
+function useExample(exampleId) {
+    const example = state.examples.find(e => e.id === exampleId);
+    if (example) {
+        state.projectConfig = { ...state.projectConfig, ...example.config_preview };
+        state.projectConfig.name = example.title;
+        state.projectConfig.description = example.description;
+        openWizard();
+    }
+}
+
+async function viewProject(projectId) {
+    showResult(projectId);
+}
+
+// Chat
+function openChat() {
+    showScreen('chat-screen');
+}
+
+async function sendMessage() {
+    const input = document.getElementById('chat-input');
+    const message = input.value.trim();
+    if (!message) return;
+
+    addChatMessage(message, 'user');
+    input.value = '';
+
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/ai/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                prompt: message,
+                provider: document.getElementById('chat-provider')?.value || null
+            })
+        });
+
+        const data = await res.json();
+        if (data.success) {
+            addChatMessage(data.response, 'assistant');
+        }
+    } catch (e) {
+        addChatMessage('Ошибка: ' + e.message, 'system');
+    }
+}
+
+function addChatMessage(text, role) {
+    const container = document.getElementById('chat-messages');
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+    div.textContent = text;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+// Media
+function openMedia() {
+    showScreen('media-screen');
+}
+
+function switchMediaTab(tab) {
+    document.querySelectorAll('.media-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.media-content').forEach(c => c.classList.remove('active'));
+
+    event.target.classList.add('active');
+    document.getElementById(`media-${tab}`).classList.add('active');
+}
+
+async function generateImage() {
+    const prompt = document.getElementById('image-prompt').value;
+    if (!prompt) return;
+
+    const resultDiv = document.getElementById('image-result');
+    resultDiv.innerHTML = '<p>Генерация...</p>';
+
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/media/image/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt })
+        });
+
+        const data = await res.json();
+        if (data.success && data.images?.[0]) {
+            resultDiv.innerHTML = `<img src="data:image/png;base64,${data.images[0]}" alt="Generated">`;
+        }
+    } catch (e) {
+        resultDiv.innerHTML = `<p class="error">Ошибка: ${e.message}</p>`;
+    }
+}
+
+async function textToSpeech() {
+    const text = document.getElementById('tts-text').value;
+    if (!text) return;
+
+    const resultDiv = document.getElementById('audio-result');
+    resultDiv.innerHTML = '<p>Генерация...</p>';
+
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/media/audio/tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text })
+        });
+
+        const data = await res.json();
+        if (data.success && data.audio) {
+            resultDiv.innerHTML = `<audio controls src="data:audio/wav;base64,${data.audio}"></audio>`;
+        }
+    } catch (e) {
+        resultDiv.innerHTML = `<p class="error">Ошибка: ${e.message}</p>`;
+    }
+}
+
+// Agents
+function openAgents() {
+    showScreen('agents-screen');
+    loadAgents();
+}
+
+async function loadAgents() {
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/agents`);
+        const data = await res.json();
+
+        const container = document.getElementById('agents-list');
+        container.innerHTML = data.agents.map(a => `
+            <div class="agent-card" onclick="runAgent('${a.id}')">
+                <div class="agent-avatar">🤖</div>
+                <div class="agent-name">${a.name}</div>
+                <div class="agent-desc">${a.description}</div>
+            </div>
+        `).join('');
+    } catch (e) {
+        console.error('Failed to load agents:', e);
+    }
+}
+
+async function runAgent(agentId) {
+    const input = prompt('Введите задачу для агента:');
+    if (!input) return;
+
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/agents/${agentId}/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ input })
+        });
+
+        const data = await res.json();
+        alert(`Агент ${data.agent} ответил:
+
+${data.response}`);
+    } catch (e) {
+        alert('Ошибка: ' + e.message);
+    }
+}
+
+// RAG
+function openRAG() {
+    showScreen('rag-screen');
+}
+
+async function sendRAGMessage() {
+    const input = document.getElementById('rag-input');
+    const message = input.value.trim();
+    if (!message) return;
+
+    addRAGMessage(message, 'user');
+    input.value = '';
+
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/rag/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ collection: 'default', query: message })
+        });
+
+        const data = await res.json();
+        if (data.success) {
+            addRAGMessage(data.answer, 'assistant');
+        }
+    } catch (e) {
+        addRAGMessage('Ошибка: ' + e.message, 'system');
+    }
+}
+
+function addRAGMessage(text, role) {
+    const container = document.getElementById('rag-messages');
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+    div.textContent = text;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+// NLP
+function openNLP() {
+    showScreen('nlp-screen');
+}
+
+async function executeNLP(command) {
+    document.getElementById('nlp-input').value = command;
+    sendNLPMessage();
+}
+
+async function sendNLPMessage() {
+    const input = document.getElementById('nlp-input');
+    const message = input.value.trim();
+    if (!message) return;
+
+    addNLPMessage(message, 'user');
+    input.value = '';
+
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/nlp/command`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: message, user_id: state.user.id })
+        });
+
+        const data = await res.json();
+        if (data.success) {
+            addNLPMessage(JSON.stringify(data.result, null, 2), 'assistant');
+        } else {
+            addNLPMessage(data.result?.answer || 'Не удалось выполнить команду', 'assistant');
+        }
+    } catch (e) {
+        addNLPMessage('Ошибка: ' + e.message, 'system');
+    }
+}
+
+function addNLPMessage(text, role) {
+    const container = document.getElementById('nlp-messages');
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+    div.style.whiteSpace = 'pre-wrap';
+    div.textContent = text;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+// Event Listeners
+function setupEventListeners() {
+    document.getElementById('refresh-providers')?.addEventListener('click', loadProviders);
+    document.getElementById('refresh-examples')?.addEventListener('click', loadExamples);
+    document.getElementById('refresh-projects')?.addEventListener('click', loadProjects);
+
+    document.getElementById('chat-input')?.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    document.getElementById('rag-input')?.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') sendRAGMessage();
+    });
+
+    document.getElementById('nlp-input')?.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') sendNLPMessage();
+    });
 }
