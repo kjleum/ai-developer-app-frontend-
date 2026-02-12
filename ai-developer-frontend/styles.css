@@ -1,0 +1,404 @@
+/* Telegram Mini App стили */
+:root {
+    --tg-bg: var(--tg-theme-bg-color, #ffffff);
+    --tg-text: var(--tg-theme-text-color, #000000);
+    --tg-hint: var(--tg-theme-hint-color, #999999);
+    --tg-link: var(--tg-theme-link-color, #2481cc);
+    --tg-button: var(--tg-theme-button-color, #2481cc);
+    --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+    --tg-secondary: var(--tg-theme-secondary-bg-color, #f5f5f5);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--tg-bg);
+    color: var(--tg-text);
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+
+#app {
+    max-width: 480px;
+    margin: 0 auto;
+    padding-bottom: 80px;
+}
+
+/* Экраны */
+.screen {
+    display: none;
+    padding: 20px;
+    animation: fadeIn 0.3s ease;
+}
+
+.screen.active {
+    display: block;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Шапка */
+.header {
+    text-align: center;
+    margin-bottom: 30px;
+    padding-top: 10px;
+}
+
+.header h1 {
+    font-size: 28px;
+    margin-bottom: 8px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.subtitle {
+    color: var(--tg-hint);
+    font-size: 16px;
+}
+
+/* Поле ввода */
+.input-section {
+    margin-bottom: 25px;
+}
+
+#project-input {
+    width: 100%;
+    padding: 16px;
+    border: 2px solid var(--tg-secondary);
+    border-radius: 12px;
+    background: var(--tg-bg);
+    color: var(--tg-text);
+    font-size: 16px;
+    resize: none;
+    transition: border-color 0.2s;
+    margin-bottom: 12px;
+}
+
+#project-input:focus {
+    outline: none;
+    border-color: var(--tg-link);
+}
+
+/* Кнопки */
+.btn-primary {
+    width: 100%;
+    padding: 16px;
+    background: var(--tg-button);
+    color: var(--tg-button-text);
+    border: none;
+    border-radius: 12px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.1s, opacity 0.2s;
+}
+
+.btn-primary:active {
+    transform: scale(0.98);
+}
+
+.btn-primary:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.btn-secondary {
+    padding: 12px 20px;
+    background: var(--tg-secondary);
+    color: var(--tg-text);
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: opacity 0.2s;
+}
+
+.btn-secondary:hover {
+    opacity: 0.8;
+}
+
+.btn-icon {
+    background: none;
+    border: none;
+    font-size: 24px;
+    cursor: pointer;
+    padding: 8px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+/* Примеры */
+.examples {
+    margin-top: 30px;
+}
+
+.examples p {
+    color: var(--tg-hint);
+    margin-bottom: 12px;
+    font-size: 14px;
+}
+
+.example-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.chip {
+    padding: 8px 16px;
+    background: var(--tg-secondary);
+    border-radius: 20px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+
+.chip:active {
+    transform: scale(0.95);
+}
+
+/* Прогресс */
+.progress-container {
+    text-align: center;
+    padding: 40px 20px;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 8px;
+    background: var(--tg-secondary);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 30px;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    width: 0%;
+    transition: width 0.5s ease;
+}
+
+.progress-steps {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 30px;
+}
+
+.step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    opacity: 0.4;
+    transition: opacity 0.3s;
+}
+
+.step.active {
+    opacity: 1;
+}
+
+.step-icon {
+    font-size: 32px;
+    margin-bottom: 8px;
+}
+
+.step-text {
+    font-size: 12px;
+    color: var(--tg-hint);
+}
+
+.progress-log {
+    color: var(--tg-hint);
+    font-size: 14px;
+    margin-top: 20px;
+}
+
+/* Результат */
+.result-success {
+    text-align: center;
+    padding: 20px 0;
+}
+
+.success-icon {
+    font-size: 64px;
+    margin-bottom: 16px;
+}
+
+.result-success h2 {
+    margin-bottom: 24px;
+}
+
+.project-card {
+    background: var(--tg-secondary);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 24px;
+    text-align: left;
+}
+
+.project-card h3 {
+    margin-bottom: 8px;
+    font-size: 18px;
+}
+
+.project-card p {
+    color: var(--tg-hint);
+    font-size: 14px;
+    margin-bottom: 16px;
+}
+
+.result-url {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.result-url input {
+    flex: 1;
+    padding: 12px;
+    border: 1px solid var(--tg-hint);
+    border-radius: 8px;
+    background: var(--tg-bg);
+    color: var(--tg-text);
+    font-size: 14px;
+}
+
+/* Фидбек */
+.feedback-section {
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid var(--tg-secondary);
+}
+
+.feedback-section p {
+    margin-bottom: 12px;
+    color: var(--tg-hint);
+}
+
+#feedback-input {
+    width: 100%;
+    padding: 12px;
+    border: 2px solid var(--tg-secondary);
+    border-radius: 10px;
+    background: var(--tg-bg);
+    color: var(--tg-text);
+    font-size: 14px;
+    resize: none;
+    margin-bottom: 12px;
+}
+
+/* Список проектов */
+.projects-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.project-item {
+    background: var(--tg-secondary);
+    border-radius: 12px;
+    padding: 16px;
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+
+.project-item:active {
+    transform: scale(0.98);
+}
+
+.project-item h4 {
+    margin-bottom: 4px;
+}
+
+.project-item .meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--tg-hint);
+}
+
+.status-badge {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.status-live {
+    background: #d4edda;
+    color: #155724;
+}
+
+.status-error {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.status-creating {
+    background: #fff3cd;
+    color: #856404;
+}
+
+/* Нижняя навигация */
+.bottom-nav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: var(--tg-bg);
+    border-top: 1px solid var(--tg-secondary);
+    display: flex;
+    justify-content: space-around;
+    padding: 8px 0;
+    max-width: 480px;
+    margin: 0 auto;
+}
+
+.nav-btn {
+    background: none;
+    border: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 24px;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.nav-btn.active {
+    opacity: 1;
+}
+
+.nav-icon {
+    font-size: 24px;
+}
+
+.nav-text {
+    font-size: 12px;
+}
+
+/* Адаптивность */
+@media (max-width: 380px) {
+    .header h1 {
+        font-size: 24px;
+    }
+
+    .step-icon {
+        font-size: 24px;
+    }
+}
