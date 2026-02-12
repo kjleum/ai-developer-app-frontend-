@@ -1,116 +1,388 @@
+<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AI Developer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>AI Developer Platform</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <div id="app">
+        <!-- Загрузка -->
+        <div id="loading-screen" class="screen active">
+            <div class="loader"></div>
+            <p>Загрузка платформы...</p>
+        </div>
+
         <!-- Главный экран -->
-        <div id="main-screen" class="screen active">
-            <header class="header">
-                <h1>🤖 AI Developer</h1>
-                <p class="subtitle">Опиши проект — я создам</p>
+        <div id="main-screen" class="screen">
+            <header class="app-header">
+                <div class="logo">
+                    <span class="logo-icon">🚀</span>
+                    <div>
+                        <h1>AI Developer</h1>
+                        <p>Платформа создания проектов</p>
+                    </div>
+                </div>
             </header>
 
-            <div class="input-section">
-                <textarea 
-                    id="project-input" 
-                    placeholder="Например: Сделай Telegram бота для автопостинга в канал..."
-                    rows="4"
-                ></textarea>
-                <button id="create-btn" class="btn-primary">
-                    <span class="btn-text">🚀 Создать проект</span>
-                    <span class="btn-loading hidden">Создаю...</span>
-                </button>
-            </div>
+            <!-- Примеры проектов (динамические) -->
+            <section class="examples-section">
+                <div class="section-header">
+                    <h2>Идеи для старта</h2>
+                    <button id="refresh-examples" class="text-btn">🔄 Обновить</button>
+                </div>
+                <div id="examples-grid" class="examples-grid">
+                    <!-- Заполняется JS -->
+                </div>
+            </section>
 
-            <div class="examples">
-                <p>Примеры:</p>
-                <div class="example-chips">
-                    <span class="chip" data-text="Парсер TikTok по хештегам">📱 TikTok парсер</span>
-                    <span class="chip" data-text="Маркетплейс цифровых товаров">🛒 Маркетплейс</span>
-                    <span class="chip" data-text="Бот для учета финансов">💰 Финансы бот</span>
-                    <span class="chip" data-text="API для обработки платежей">💳 Платежи API</span>
+            <!-- Быстрый старт -->
+            <section class="quick-start">
+                <h2>Или создай свой проект</h2>
+                <button id="create-project-btn" class="btn-primary btn-large">
+                    <span>✨</span>
+                    <div>
+                        <strong>Создать проект</strong>
+                        <small>Настрой всё под себя</small>
+                    </div>
+                </button>
+            </section>
+
+            <!-- Недавние проекты -->
+            <section class="recent-projects">
+                <h2>Ваши проекты</h2>
+                <div id="projects-list" class="projects-list">
+                    <p class="empty-state">Пока нет проектов. Создайте первый!</p>
+                </div>
+            </section>
+        </div>
+
+        <!-- Мастер создания проекта -->
+        <div id="wizard-screen" class="screen">
+            <header class="wizard-header">
+                <button id="wizard-back" class="icon-btn">←</button>
+                <div class="wizard-progress">
+                    <div class="step-indicator active" data-step="1">1</div>
+                    <div class="step-line"></div>
+                    <div class="step-indicator" data-step="2">2</div>
+                    <div class="step-line"></div>
+                    <div class="step-indicator" data-step="3">3</div>
+                    <div class="step-line"></div>
+                    <div class="step-indicator" data-step="4">4</div>
+                </div>
+                <div style="width: 40px;"></div>
+            </header>
+
+            <div class="wizard-content">
+                <!-- Шаг 1: Основное -->
+                <div id="step-1" class="wizard-step active">
+                    <h2>Основная информация</h2>
+                    <p class="step-description">Расскажите о вашем проекте</p>
+
+                    <div class="form-group">
+                        <label>Название проекта *</label>
+                        <input type="text" id="project-name" placeholder="Например: TikTok Parser" maxlength="50">
+                        <span class="hint">Краткое и понятное название</span>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Тип проекта *</label>
+                        <div class="type-selector" id="project-type">
+                            <button class="type-card" data-value="api">
+                                <span>🔌</span>
+                                <strong>API</strong>
+                                <small>REST сервис</small>
+                            </button>
+                            <button class="type-card" data-value="bot">
+                                <span>🤖</span>
+                                <strong>Бот</strong>
+                                <small>Telegram/Discord</small>
+                            </button>
+                            <button class="type-card" data-value="frontend">
+                                <span>🎨</span>
+                                <strong>Frontend</strong>
+                                <small>Веб-приложение</small>
+                            </button>
+                            <button class="type-card" data-value="scraper">
+                                <span>🔍</span>
+                                <strong>Парсер</strong>
+                                <small>Сбор данных</small>
+                            </button>
+                            <button class="type-card" data-value="fullstack">
+                                <span>⚡</span>
+                                <strong>Fullstack</strong>
+                                <small>Frontend + Backend</small>
+                            </button>
+                            <button class="type-card" data-value="cli">
+                                <span>⌨️</span>
+                                <strong>CLI</strong>
+                                <small>Консольное приложение</small>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Описание проекта *</label>
+                        <textarea id="project-description" rows="4" placeholder="Опишите, что должен делать проект..."></textarea>
+                    </div>
+
+                    <button class="btn-primary btn-next" data-next="2">Продолжить →</button>
+                </div>
+
+                <!-- Шаг 2: Функции -->
+                <div id="step-2" class="wizard-step">
+                    <h2>Функционал</h2>
+                    <p class="step-description">Какие функции нужны?</p>
+
+                    <div class="form-group">
+                        <label>Добавьте функции</label>
+                        <div class="feature-input-group">
+                            <input type="text" id="feature-name" placeholder="Название функции">
+                            <select id="feature-priority">
+                                <option value="must">Обязательно</option>
+                                <option value="should">Желательно</option>
+                                <option value="could">Если получится</option>
+                            </select>
+                            <button id="add-feature" class="btn-secondary">+</button>
+                        </div>
+                        <textarea id="feature-desc" placeholder="Описание функции..." rows="2"></textarea>
+                    </div>
+
+                    <div id="features-list" class="features-list"></div>
+
+                    <div class="quick-features">
+                        <p>Быстрое добавление:</p>
+                        <div class="quick-tags">
+                            <button class="tag" data-feature="Авторизация">🔐 Авторизация</button>
+                            <button class="tag" data-feature="Админ-панель">👤 Админ-панель</button>
+                            <button class="tag" data-feature="API документация">📚 API Docs</button>
+                            <button class="tag" data-feature="Email уведомления">📧 Email</button>
+                            <button class="tag" data-feature="Платежи">💳 Платежи</button>
+                            <button class="tag" data-feature="Аналитика">📊 Аналитика</button>
+                        </div>
+                    </div>
+
+                    <div class="wizard-nav">
+                        <button class="btn-text btn-prev" data-prev="1">← Назад</button>
+                        <button class="btn-primary btn-next" data-next="3">Продолжить →</button>
+                    </div>
+                </div>
+
+                <!-- Шаг 3: Технологии -->
+                <div id="step-3" class="wizard-step">
+                    <h2>Технологии</h2>
+                    <p class="step-description">Выберите стек технологий</p>
+
+                    <div class="tech-section">
+                        <label>База данных</label>
+                        <div class="tech-grid" id="database-select">
+                            <button class="tech-card active" data-value="none">
+                                <span>❌</span>
+                                <strong>Нет</strong>
+                            </button>
+                            <button class="tech-card" data-value="postgresql">
+                                <span>🐘</span>
+                                <strong>PostgreSQL</strong>
+                            </button>
+                            <button class="tech-card" data-value="mongodb">
+                                <span>🍃</span>
+                                <strong>MongoDB</strong>
+                            </button>
+                            <button class="tech-card" data-value="redis">
+                                <span>⚡</span>
+                                <strong>Redis</strong>
+                            </button>
+                            <button class="tech-card" data-value="supabase">
+                                <span>🔥</span>
+                                <strong>Supabase</strong>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="tech-section" id="frontend-section" style="display: none;">
+                        <label>Frontend фреймворк</label>
+                        <div class="tech-grid" id="frontend-select">
+                            <button class="tech-card active" data-value="none">
+                                <span>❌</span>
+                                <strong>Нет</strong>
+                            </button>
+                            <button class="tech-card" data-value="react">
+                                <span>⚛️</span>
+                                <strong>React</strong>
+                            </button>
+                            <button class="tech-card" data-value="vue">
+                                <span>🟢</span>
+                                <strong>Vue</strong>
+                            </button>
+                            <button class="tech-card" data-value="telegram_mini_app">
+                                <span>✈️</span>
+                                <strong>Telegram Mini App</strong>
+                            </button>
+                            <button class="tech-card" data-value="vanilla">
+                                <span>🟨</span>
+                                <strong>Vanilla JS</strong>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="tech-section">
+                        <label>Дополнительно</label>
+                        <div class="checkbox-group">
+                            <label class="checkbox-card">
+                                <input type="checkbox" id="opt-auth">
+                                <span>🔐 JWT Авторизация</span>
+                            </label>
+                            <label class="checkbox-card">
+                                <input type="checkbox" id="opt-admin">
+                                <span>👤 Админ-панель</span>
+                            </label>
+                            <label class="checkbox-card">
+                                <input type="checkbox" id="opt-docs" checked>
+                                <span>📚 API Документация</span>
+                            </label>
+                            <label class="checkbox-card">
+                                <input type="checkbox" id="opt-tests">
+                                <span>🧪 Тесты</span>
+                            </label>
+                            <label class="checkbox-card">
+                                <input type="checkbox" id="opt-docker">
+                                <span>🐳 Docker</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="wizard-nav">
+                        <button class="btn-text btn-prev" data-prev="2">← Назад</button>
+                        <button class="btn-primary btn-next" data-next="4">Продолжить →</button>
+                    </div>
+                </div>
+
+                <!-- Шаг 4: AI и Деплой -->
+                <div id="step-4" class="wizard-step">
+                    <h2>AI и Деплой</h2>
+                    <p class="step-description">Настройте генерацию и публикацию</p>
+
+                    <div class="form-group">
+                        <label>AI Провайдер</label>
+                        <div id="ai-providers" class="ai-providers">
+                            <div class="loading">Загрузка провайдеров...</div>
+                        </div>
+                    </div>
+
+                    <div class="form-group" id="model-select-group" style="display: none;">
+                        <label>Модель</label>
+                        <select id="ai-model">
+                            <option value="">Автовыбор</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Креативность AI</label>
+                        <input type="range" id="ai-temperature" min="0" max="100" value="70">
+                        <div class="range-labels">
+                            <span>Консервативно</span>
+                            <span id="temp-value">0.7</span>
+                            <span>Креативно</span>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Публикация</label>
+                        <div class="deploy-options">
+                            <label class="radio-card active">
+                                <input type="radio" name="deploy" value="render" checked>
+                                <span>🚀 Render</span>
+                                <small>Автодеплой + GitHub</small>
+                            </label>
+                            <label class="radio-card">
+                                <input type="radio" name="deploy" value="none">
+                                <span>📦 Только код</span>
+                                <small>Скачать архивом</small>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="summary-box">
+                        <h3>📋 Итоговая конфигурация</h3>
+                        <div id="config-summary"></div>
+                    </div>
+
+                    <div class="wizard-nav">
+                        <button class="btn-text btn-prev" data-prev="3">← Назад</button>
+                        <button id="create-final-btn" class="btn-primary btn-success">
+                            ✨ Создать проект
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
 
-        <!-- Экран создания -->
-        <div id="creating-screen" class="screen">
-            <div class="progress-container">
-                <div class="progress-bar">
-                    <div class="progress-fill" id="progress-fill"></div>
-                </div>
-                <div class="progress-steps">
-                    <div class="step active" data-step="1">
-                        <div class="step-icon">🧠</div>
-                        <div class="step-text">Анализ</div>
-                    </div>
-                    <div class="step" data-step="2">
-                        <div class="step-icon">💻</div>
-                        <div class="step-text">Код</div>
-                    </div>
-                    <div class="step" data-step="3">
-                        <div class="step-icon">☁️</div>
-                        <div class="step-text">Деплой</div>
-                    </div>
-                    <div class="step" data-step="4">
-                        <div class="step-icon">✅</div>
-                        <div class="step-text">Готово</div>
-                    </div>
-                </div>
-                <div class="progress-log" id="progress-log">Инициализация...</div>
+        <!-- Экран загрузки генерации -->
+        <div id="generating-screen" class="screen">
+            <div class="generating-animation">
+                <div class="code-particles"></div>
+                <div class="center-icon">🤖</div>
             </div>
+            <h2>AI создаёт ваш проект</h2>
+            <div class="progress-steps">
+                <div class="progress-step active" id="step-analyze">
+                    <span class="step-icon">🧠</span>
+                    <span>Анализ требований</span>
+                </div>
+                <div class="progress-step" id="step-architecture">
+                    <span class="step-icon">🏗️</span>
+                    <span>Проектирование архитектуры</span>
+                </div>
+                <div class="progress-step" id="step-code">
+                    <span class="step-icon">💻</span>
+                    <span>Генерация кода</span>
+                </div>
+                <div class="progress-step" id="step-deploy">
+                    <span class="step-icon">🚀</span>
+                    <span>Деплой</span>
+                </div>
+            </div>
+            <p id="generating-status">Инициализация...</p>
         </div>
 
         <!-- Экран результата -->
         <div id="result-screen" class="screen">
-            <div class="result-success">
+            <div class="result-header">
                 <div class="success-icon">🎉</div>
-                <h2>Проект создан!</h2>
-                <div class="project-card">
-                    <h3 id="result-name">Название проекта</h3>
-                    <p id="result-type">Тип: Bot</p>
-                    <div class="result-url">
-                        <input type="text" id="result-link" readonly>
-                        <button id="copy-btn" class="btn-secondary">📋</button>
+                <h2>Проект готов!</h2>
+                <p id="result-name">project-name</p>
+            </div>
+
+            <div class="result-links">
+                <a id="result-deploy-url" href="#" target="_blank" class="result-card primary">
+                    <span>🌐</span>
+                    <div>
+                        <strong>Открыть сайт</strong>
+                        <small id="deploy-url-text">deploy-url</small>
                     </div>
-                    <a id="visit-btn" href="#" target="_blank" class="btn-primary">Открыть проект</a>
-                </div>
+                </a>
+                <a id="result-github-url" href="#" target="_blank" class="result-card">
+                    <span>📁</span>
+                    <div>
+                        <strong>GitHub репозиторий</strong>
+                        <small>Исходный код</small>
+                    </div>
+                </a>
+            </div>
 
-                <div class="feedback-section">
-                    <p>Нужны правки?</p>
-                    <textarea id="feedback-input" placeholder="Например: добавь кнопку меню..." rows="2"></textarea>
-                    <button id="update-btn" class="btn-secondary">🔄 Обновить проект</button>
-                </div>
+            <div class="result-files">
+                <h3>Созданные файлы</h3>
+                <div id="files-list" class="files-list"></div>
+            </div>
+
+            <div class="result-actions">
+                <button id="new-project-btn" class="btn-primary">Создать ещё проект</button>
+                <button id="view-projects-btn" class="btn-secondary">Мои проекты</button>
             </div>
         </div>
-
-        <!-- Экран моих проектов -->
-        <div id="projects-screen" class="screen">
-            <header class="header">
-                <h2>📁 Мои проекты</h2>
-                <button id="back-btn" class="btn-icon">←</button>
-            </header>
-            <div id="projects-list" class="projects-list">
-                <!-- Проекты загружаются сюда -->
-            </div>
-        </div>
-
-        <!-- Навигация -->
-        <nav class="bottom-nav">
-            <button class="nav-btn active" data-screen="main-screen">
-                <span class="nav-icon">🏠</span>
-                <span class="nav-text">Создать</span>
-            </button>
-            <button class="nav-btn" data-screen="projects-screen">
-                <span class="nav-icon">📁</span>
-                <span class="nav-text">Проекты</span>
-            </button>
-        </nav>
     </div>
 
     <script src="app.js"></script>

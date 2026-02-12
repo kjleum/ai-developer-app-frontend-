@@ -1,91 +1,267 @@
-// Telegram Mini App логика
-const tg = window.Telegram.WebApp;
-
-// Конфигурация API
-const API_URL = "https://ai-developer-api.onrender.com"; // Заменишь на свой URL после деплоя backend
-
-// Инициализация
-tg.ready();
-tg.expand();
+// Конфигурация
+const CONFIG = {
+    API_URL: 'https://ai-developer-api.onrender.com',
+    TELEGRAM_MODE: true
+};
 
 // Состояние приложения
 const state = {
-    userId: tg.initDataUnsafe?.user?.id?.toString() || 'test_user',
-    currentProject: null,
-    projects: []
+    user: null,
+    currentStep: 1,
+    projectConfig: {
+        name: '',
+        description: '',
+        type: 'api',
+        features: [],
+        database: 'none',
+        frontend: 'none',
+        authentication: false,
+        admin_panel: false,
+        api_documentation: true,
+        tests: false,
+        docker: false,
+        ai_settings: {
+            provider: 'groq',
+            model: null,
+            temperature: 0.7,
+            max_tokens: 4000
+        },
+        auto_deploy: true,
+        platform: 'render'
+    },
+    aiProviders: [],
+    examples: []
 };
 
-// DOM элементы
-const screens = {
-    main: document.getElementById('main-screen'),
-    creating: document.getElementById('creating-screen'),
-    result: document.getElementById('result-screen'),
-    projects: document.getElementById('projects-screen')
-};
+// Инициализация
+document.addEventListener('DOMContentLoaded', async () => {
+    initTelegram();
+    await loadData();
+    setupEventListeners();
+    showScreen('main-screen');
+});
 
-// Навигация
-function showScreen(screenName) {
-    Object.values(screens).forEach(s => s.classList.remove('active'));
-    screens[screenName].classList.add('active');
+// Telegram WebApp
+function initTelegram() {
+    if (window.Telegram?.WebApp) {
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand();
 
-    // Обновляем нижнюю навигацию
-    document.querySelectorAll('.nav-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.screen === screenName + '-screen');
-    });
+        state.user = {
+            id: tg.initDataUnsafe?.user?.id?.toString() || 'demo_user',
+            username: tg.initDataUnsafe?.user?.username || 'demo'
+        };
+
+        tg.setHeaderColor('#0f0f23');
+        tg.setBackgroundColor('#0f0f23');
+    } else {
+        state.user = { id: 'web_user_' + Date.now(), username: 'web_user' };
+    }
 }
 
-// Обработчики навигации
-document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        const screen = btn.dataset.screen.replace('-screen', '');
-        if (screen === 'projects') loadProjects();
-        showScreen(screen);
-    });
-});
+// Загрузка данных
+async function loadData() {
+    try {
+        const providersRes = await fetch(`${CONFIG.API_URL}/ai/providers`);
+        const providersData = await providersRes.json();
+        state.aiProviders = providersData.providers;
 
-document.getElementById('back-btn').addEventListener('click', () => {
-    showScreen('main');
-});
+        const recommended = state.aiProviders.find(p => p.recommended && p.available);
+        if (recommended) {
+            state.projectConfig.ai_settings.provider = recommended.id;
+        }
 
-// Выбор примера
-document.querySelectorAll('.chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-        document.getElementById('project-input').value = chip.dataset.text;
-    });
-});
+        await loadExamples();
+        await loadUserProjects();
 
-// Создание проекта
-document.getElementById('create-btn').addEventListener('click', createProject);
+    } catch (error) {
+        console.error('Ошибка загрузки:', error);
+    }
+}
 
-async function createProject() {
-    const description = document.getElementById('project-input').value.trim();
-    if (!description) {
-        tg.showAlert('Опиши проект');
+async function loadExamples() {
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/examples`);
+        const data = await res.json();
+        state.examples = data.examples;
+        renderExamples();
+    } catch (error) {
+        console.error('Ошибка загрузки примеров:', error);
+    }
+}
+
+async function loadUserProjects() {
+    try {
+        const res = await fetch(`${CONFIG.API_URL}/projects?user_id=${state.user.id}`);
+        const data = await res.json();
+        renderProjects(data.projects);
+    } catch (error) {
+        console.error('Ошибка загрузки проектов:', error);
+    }
+}
+
+// Рендер примеров
+function renderExamples() {
+    const container = document.getElementById('examples-grid');
+    container.innerHTML = state.examples.map(example => `
+        <div class="example-card" onclick="useExample('${example.id}')">
+            <div class="icon">${example.icon}</div>
+            <h3>${example.title}</h3>
+            <p>${example.description}</p>
+        </div>
+    `).join('');
+}
+
+// Рендер проектов
+function renderProjects(projects) {
+    const container = document.getElementById('projects-list');
+
+    if (!projects || projects.length === 0) {
+        container.innerHTML = '<p class="empty-state">Пока нет проектов. Создайте первый!</p>';
         return;
     }
 
-    const btn = document.getElementById('create-btn');
-    const btnText = btn.querySelector('.btn-text');
-    const btnLoading = btn.querySelector('.btn-loading');
+    const icons = { api: '🔌', bot: '🤖', frontend: '🎨', scraper: '🔍', fullstack: '⚡', cli: '⌨️' };
 
-    // UI: начало создания
-    btn.disabled = true;
-    btnText.classList.add('hidden');
-    btnLoading.classList.remove('hidden');
-    showScreen('creating');
+    container.innerHTML = projects.map(project => `
+        <div class="project-item" onclick="viewProject('${project.id}')">
+            <div class="project-icon">${icons[project.config?.type] || '📦'}</div>
+            <div class="project-info">
+                <h4>${project.config?.name || 'Без названия'}</h4>
+                <p>${project.config?.type || 'unknown'} • ${formatDate(project.created_at)}</p>
+            </div>
+            <span class="project-status status-${project.status}">${project.status}</span>
+        </div>
+    `).join('');
+}
 
-    // Прогресс
-    updateProgress(1, 'Анализирую задачу...');
+// Использовать пример
+function useExample(exampleId) {
+    const example = state.examples.find(e => e.id === exampleId);
+    if (!example) return;
+
+    state.projectConfig = {
+        ...state.projectConfig,
+        ...example.config_preview,
+        name: example.title.replace(/[^\w\s]/g, '').trim(),
+        description: example.description
+    };
+
+    state.currentStep = 4;
+    openWizard();
+}
+
+// Мастер создания проекта
+function openWizard() {
+    showScreen('wizard-screen');
+    updateWizardStep();
+    renderAIProviders();
+}
+
+function updateWizardStep() {
+    document.querySelectorAll('.step-indicator').forEach((el, idx) => {
+        el.classList.toggle('active', idx + 1 === state.currentStep);
+    });
+
+    document.querySelectorAll('.wizard-step').forEach((el, idx) => {
+        el.classList.toggle('active', idx + 1 === state.currentStep);
+    });
+
+    if (state.currentStep === 4) {
+        updateSummary();
+    }
+}
+
+function updateSummary() {
+    const container = document.getElementById('config-summary');
+    const typeNames = { api: 'REST API', bot: 'Бот', frontend: 'Frontend', scraper: 'Парсер', fullstack: 'Fullstack', cli: 'CLI' };
+
+    container.innerHTML = `
+        <div class="summary-item">
+            <span>Название:</span>
+            <strong>${state.projectConfig.name || 'Не указано'}</strong>
+        </div>
+        <div class="summary-item">
+            <span>Тип:</span>
+            <strong>${typeNames[state.projectConfig.type]}</strong>
+        </div>
+        <div class="summary-item">
+            <span>Функций:</span>
+            <strong>${state.projectConfig.features.length}</strong>
+        </div>
+        <div class="summary-item">
+            <span>База данных:</span>
+            <strong>${state.projectConfig.database}</strong>
+        </div>
+        <div class="summary-item">
+            <span>AI провайдер:</span>
+            <strong>${state.aiProviders.find(p => p.id === state.projectConfig.ai_settings.provider)?.name || 'Auto'}</strong>
+        </div>
+    `;
+}
+
+// Рендер AI провайдеров
+function renderAIProviders() {
+    const container = document.getElementById('ai-providers');
+
+    container.innerHTML = state.aiProviders.map(provider => `
+        <div class="ai-provider-card ${provider.available ? '' : 'unavailable'} ${provider.id === state.projectConfig.ai_settings.provider ? 'selected' : ''}" 
+             onclick="${provider.available ? `selectAIProvider('${provider.id}')` : ''}">
+            <div class="provider-icon">
+                ${provider.id === 'groq' ? '⚡' : provider.id === 'gemini' ? '🧠' : provider.id === 'openai' ? '🔮' : '📦'}
+            </div>
+            <div class="provider-info">
+                <span class="provider-name">${provider.name}</span>
+                <span class="provider-meta">${provider.speed} • ${provider.limits}</span>
+            </div>
+            ${provider.recommended ? '<span class="provider-badge badge-recommended">Рекомендуем</span>' : ''}
+            ${!provider.available ? '<span class="provider-badge badge-paid">Нет ключа</span>' : 
+              provider.cost === 'Бесплатно' ? '<span class="provider-badge badge-free">Бесплатно</span>' : 
+              '<span class="provider-badge badge-paid">Платно</span>'}
+        </div>
+    `).join('');
+
+    updateModelsList();
+}
+
+function selectAIProvider(providerId) {
+    state.projectConfig.ai_settings.provider = providerId;
+    renderAIProviders();
+    updateModelsList();
+}
+
+function updateModelsList() {
+    const provider = state.aiProviders.find(p => p.id === state.projectConfig.ai_settings.provider);
+    const select = document.getElementById('ai-model');
+    const group = document.getElementById('model-select-group');
+
+    if (!provider || provider.models.length <= 1) {
+        group.style.display = 'none';
+        return;
+    }
+
+    group.style.display = 'block';
+    select.innerHTML = `
+        <option value="">Автовыбор (${provider.default_model})</option>
+        ${provider.models.map(m => `<option value="${m}">${m}</option>`).join('')}
+    `;
+}
+
+// Создание проекта
+async function createProject() {
+    if (!validateConfig()) return;
+
+    showScreen('generating-screen');
+    updateGeneratingStatus('analyze', 'active');
 
     try {
-        // Отправка запроса
-        const response = await fetch(`${API_URL}/create`, {
+        const response = await fetch(`${CONFIG.API_URL}/projects`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                description: description,
-                user_id: state.userId,
-                project_name: description.slice(0, 30) + '...'
+                user_id: state.user.id,
+                config: state.projectConfig
             })
         });
 
@@ -95,216 +271,281 @@ async function createProject() {
             throw new Error(data.detail || 'Ошибка создания');
         }
 
-        state.currentProject = data;
-
-        // Симуляция прогресса (в реальности polling статуса)
         await simulateProgress();
-
-        // Показываем результат
-        showResult(data);
+        const project = await pollProjectStatus(data.project_id);
+        showResult(project);
 
     } catch (error) {
-        console.error('Error:', error);
-        tg.showAlert('Ошибка: ' + error.message);
-        showScreen('main');
-    } finally {
-        btn.disabled = false;
-        btnText.classList.remove('hidden');
-        btnLoading.classList.add('hidden');
+        console.error('Ошибка:', error);
+        alert(error.message);
+        showScreen('main-screen');
     }
 }
 
-// Симуляция прогресса (пока backend работает)
 async function simulateProgress() {
     const steps = [
-        { step: 1, text: 'Анализирую задачу...', delay: 2000 },
-        { step: 2, text: 'Генерирую код...', delay: 3000 },
-        { step: 3, text: 'Деплою на сервер...', delay: 4000 },
-        { step: 4, text: 'Почти готово...', delay: 2000 }
+        { id: 'analyze', delay: 2000, next: 'architecture' },
+        { id: 'architecture', delay: 3000, next: 'code' },
+        { id: 'code', delay: 5000, next: 'deploy' },
+        { id: 'deploy', delay: 4000, next: null }
     ];
 
-    for (const s of steps) {
-        updateProgress(s.step, s.text);
-        await sleep(s.delay);
+    for (const step of steps) {
+        await new Promise(r => setTimeout(r, step.delay));
+
+        const el = document.getElementById(`step-${step.id}`);
+        if (el) {
+            el.classList.add('completed');
+            el.classList.remove('active');
+        }
+
+        if (step.next) {
+            const nextEl = document.getElementById(`step-${step.next}`);
+            if (nextEl) nextEl.classList.add('active');
+        }
+
+        updateGeneratingStatus(step.id, 'completed');
     }
 }
 
-function updateProgress(step, text) {
-    const percent = (step / 4) * 100;
-    document.getElementById('progress-fill').style.width = percent + '%';
-    document.getElementById('progress-log').textContent = text;
-
-    document.querySelectorAll('.step').forEach((el, idx) => {
-        el.classList.toggle('active', idx < step);
-    });
+async function pollProjectStatus(projectId) {
+    await new Promise(r => setTimeout(r, 2000));
+    const res = await fetch(`${CONFIG.API_URL}/projects/${projectId}?user_id=${state.user.id}`);
+    return await res.json();
 }
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+function updateGeneratingStatus(step, status) {
+    const messages = {
+        analyze: 'Анализируем требования...',
+        architecture: 'Проектируем архитектуру...',
+        code: 'Генерируем код...',
+        deploy: 'Деплоим на сервер...'
+    };
+
+    const el = document.getElementById('generating-status');
+    if (el) el.textContent = messages[step] || 'Обработка...';
 }
 
 // Показ результата
-function showResult(data) {
-    document.getElementById('result-name').textContent = data.architecture?.type || 'Проект';
-    document.getElementById('result-type').textContent = `Тип: ${data.architecture?.description || 'Приложение'}`;
-    document.getElementById('result-link').value = data.url || 'Создается...';
-    document.getElementById('visit-btn').href = data.url || '#';
+function showResult(project) {
+    showScreen('result-screen');
 
-    showScreen('result');
+    document.getElementById('result-name').textContent = project.config.name;
+    document.getElementById('result-deploy-url').href = project.deploy_url || '#';
+    document.getElementById('deploy-url-text').textContent = project.deploy_url || 'Не развёрнут';
+    document.getElementById('result-github-url').href = project.github_url || '#';
 
-    // Уведомление в Telegram
-    tg.showPopup({
-        title: 'Готово! 🎉',
-        message: `Проект создан: ${data.architecture?.type}`,
-        buttons: [{ id: 'ok', text: 'Отлично', type: 'default' }]
+    const filesContainer = document.getElementById('files-list');
+    const files = Object.keys(project.files || {});
+    filesContainer.innerHTML = files.map(f => `<span class="file-tag">${f}</span>`).join('');
+}
+
+// Валидация
+function validateConfig() {
+    if (!state.projectConfig.name.trim()) {
+        alert('Введите название проекта');
+        state.currentStep = 1;
+        updateWizardStep();
+        return false;
+    }
+
+    if (!state.projectConfig.description.trim()) {
+        alert('Введите описание проекта');
+        state.currentStep = 1;
+        updateWizardStep();
+        return false;
+    }
+
+    return true;
+}
+
+// Навигация
+function showScreen(screenId) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(screenId).classList.add('active');
+}
+
+// Event Listeners
+function setupEventListeners() {
+    document.getElementById('create-project-btn').addEventListener('click', () => {
+        state.currentStep = 1;
+        state.projectConfig = getDefaultConfig();
+        openWizard();
+    });
+
+    document.getElementById('refresh-examples').addEventListener('click', loadExamples);
+    document.getElementById('wizard-back').addEventListener('click', () => showScreen('main-screen'));
+
+    document.querySelectorAll('.btn-next').forEach(btn => {
+        btn.addEventListener('click', () => {
+            state.currentStep = parseInt(btn.dataset.next);
+            updateWizardStep();
+        });
+    });
+
+    document.querySelectorAll('.btn-prev').forEach(btn => {
+        btn.addEventListener('click', () => {
+            state.currentStep = parseInt(btn.dataset.prev);
+            updateWizardStep();
+        });
+    });
+
+    document.querySelectorAll('.type-card').forEach(card => {
+        card.addEventListener('click', () => {
+            document.querySelectorAll('.type-card').forEach(c => c.classList.remove('selected'));
+            card.classList.add('selected');
+            state.projectConfig.type = card.dataset.value;
+
+            const frontendSection = document.getElementById('frontend-section');
+            frontendSection.style.display = card.dataset.value === 'fullstack' ? 'block' : 'none';
+        });
+    });
+
+    document.getElementById('project-name').addEventListener('input', (e) => {
+        state.projectConfig.name = e.target.value;
+    });
+
+    document.getElementById('project-description').addEventListener('input', (e) => {
+        state.projectConfig.description = e.target.value;
+    });
+
+    document.getElementById('add-feature').addEventListener('click', addFeature);
+
+    document.querySelectorAll('.quick-tags .tag').forEach(tag => {
+        tag.addEventListener('click', () => {
+            document.getElementById('feature-name').value = tag.dataset.feature;
+            document.getElementById('feature-desc').focus();
+        });
+    });
+
+    document.querySelectorAll('#database-select .tech-card').forEach(card => {
+        card.addEventListener('click', () => {
+            document.querySelectorAll('#database-select .tech-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            state.projectConfig.database = card.dataset.value;
+        });
+    });
+
+    document.querySelectorAll('#frontend-select .tech-card').forEach(card => {
+        card.addEventListener('click', () => {
+            document.querySelectorAll('#frontend-select .tech-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            state.projectConfig.frontend = card.dataset.value;
+        });
+    });
+
+    ['auth', 'admin', 'docs', 'tests', 'docker'].forEach(opt => {
+        document.getElementById(`opt-${opt}`).addEventListener('change', (e) => {
+            const key = opt === 'auth' ? 'authentication' : opt === 'admin' ? 'admin_panel' : opt === 'docs' ? 'api_documentation' : opt;
+            state.projectConfig[key] = e.target.checked;
+        });
+    });
+
+    document.getElementById('ai-temperature').addEventListener('input', (e) => {
+        const val = e.target.value / 100;
+        state.projectConfig.ai_settings.temperature = val;
+        document.getElementById('temp-value').textContent = val.toFixed(1);
+    });
+
+    document.getElementById('ai-model').addEventListener('change', (e) => {
+        state.projectConfig.ai_settings.model = e.target.value || null;
+    });
+
+    document.querySelectorAll('input[name="deploy"]').forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            state.projectConfig.auto_deploy = e.target.value === 'render';
+            document.querySelectorAll('.radio-card').forEach(c => c.classList.remove('active'));
+            e.target.closest('.radio-card').classList.add('active');
+        });
+    });
+
+    document.getElementById('create-final-btn').addEventListener('click', createProject);
+
+    document.getElementById('new-project-btn').addEventListener('click', () => {
+        state.currentStep = 1;
+        state.projectConfig = getDefaultConfig();
+        openWizard();
+    });
+
+    document.getElementById('view-projects-btn').addEventListener('click', () => {
+        showScreen('main-screen');
+        loadUserProjects();
     });
 }
 
-// Копирование ссылки
-document.getElementById('copy-btn').addEventListener('click', () => {
-    const link = document.getElementById('result-link');
-    link.select();
-    document.execCommand('copy');
-    tg.showAlert('Ссылка скопирована!');
-});
+// Добавление функции
+function addFeature() {
+    const name = document.getElementById('feature-name').value.trim();
+    const desc = document.getElementById('feature-desc').value.trim();
+    const priority = document.getElementById('feature-priority').value;
 
-// Обновление проекта
-document.getElementById('update-btn').addEventListener('click', async () => {
-    const feedback = document.getElementById('feedback-input').value.trim();
-    if (!feedback) {
-        tg.showAlert('Опиши что изменить');
+    if (!name) {
+        alert('Введите название функции');
         return;
     }
 
-    if (!state.currentProject) {
-        tg.showAlert('Нет активного проекта');
-        return;
-    }
+    state.projectConfig.features.push({ name, description: desc, priority });
+    renderFeatures();
 
-    try {
-        const response = await fetch(`${API_URL}/update`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                project_id: state.currentProject.project_id,
-                feedback: feedback,
-                user_id: state.userId
-            })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            tg.showAlert('Проект обновлен!');
-            document.getElementById('result-link').value = data.url;
-            document.getElementById('visit-btn').href = data.url;
-        } else {
-            throw new Error(data.detail);
-        }
-    } catch (error) {
-        tg.showAlert('Ошибка: ' + error.message);
-    }
-});
-
-// Загрузка списка проектов
-async function loadProjects() {
-    try {
-        const response = await fetch(`${API_URL}/projects/${state.userId}`);
-        const data = await response.json();
-
-        state.projects = data.projects || [];
-        renderProjects();
-    } catch (error) {
-        console.error('Error loading projects:', error);
-        document.getElementById('projects-list').innerHTML = 
-            '<p style="text-align: center; color: var(--tg-hint);">Ошибка загрузки</p>';
-    }
+    document.getElementById('feature-name').value = '';
+    document.getElementById('feature-desc').value = '';
 }
 
-function renderProjects() {
-    const container = document.getElementById('projects-list');
+function renderFeatures() {
+    const container = document.getElementById('features-list');
 
-    if (state.projects.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--tg-hint);">Нет проектов</p>';
+    if (state.projectConfig.features.length === 0) {
+        container.innerHTML = '';
         return;
     }
 
-    container.innerHTML = state.projects.map(p => `
-        <div class="project-item" data-id="${p.id}">
-            <h4>${p.name}</h4>
-            <div class="meta">
-                <span class="status-badge status-${p.status}">${getStatusText(p.status)}</span>
-                <span>${new Date(p.created_at).toLocaleDateString()}</span>
+    container.innerHTML = state.projectConfig.features.map((f, idx) => `
+        <div class="feature-item">
+            <span class="feature-priority priority-${f.priority}">${f.priority}</span>
+            <div style="flex: 1;">
+                <div class="feature-name">${f.name}</div>
+                ${f.description ? `<div class="feature-desc">${f.description}</div>` : ''}
             </div>
+            <button class="btn-delete" onclick="removeFeature(${idx})">🗑️</button>
         </div>
     `).join('');
-
-    // Клик по проекту
-    document.querySelectorAll('.project-item').forEach(item => {
-        item.addEventListener('click', () => {
-            const project = state.projects.find(p => p.id === item.dataset.id);
-            if (project) {
-                state.currentProject = project;
-                showResult(project);
-            }
-        });
-    });
 }
 
-function getStatusText(status) {
-    const map = {
-        'live': 'Работает',
-        'error': 'Ошибка',
-        'creating': 'Создается',
-        'generating': 'Генерация'
+function removeFeature(index) {
+    state.projectConfig.features.splice(index, 1);
+    renderFeatures();
+}
+
+// Утилиты
+function getDefaultConfig() {
+    return {
+        name: '',
+        description: '',
+        type: 'api',
+        features: [],
+        database: 'none',
+        frontend: 'none',
+        authentication: false,
+        admin_panel: false,
+        api_documentation: true,
+        tests: false,
+        docker: false,
+        ai_settings: {
+            provider: state.aiProviders.find(p => p.recommended && p.available)?.id || 'mock',
+            model: null,
+            temperature: 0.7,
+            max_tokens: 4000
+        },
+        auto_deploy: true,
+        platform: 'render'
     };
-    return map[status] || status;
 }
 
-// Проверка статуса проекта (polling)
-async function checkProjectStatus(projectId) {
-    try {
-        const response = await fetch(`${API_URL}/status/${projectId}?user_id=${state.userId}`);
-        const data = await response.json();
-        return data;
-    } catch (error) {
-        console.error('Status check error:', error);
-        return null;
-    }
+function formatDate(dateString) {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
 }
 
-// Инициализация при загрузке
-document.addEventListener('DOMContentLoaded', () => {
-    console.log('AI Developer Mini App загружен');
-    console.log('User ID:', state.userId);
-});
-
-// Обработка свайпов для навигации
-let touchStartX = 0;
-let touchEndX = 0;
-
-document.addEventListener('touchstart', e => {
-    touchStartX = e.changedTouches[0].screenX;
-});
-
-document.addEventListener('touchend', e => {
-    touchEndX = e.changedTouches[0].screenX;
-    handleSwipe();
-});
-
-function handleSwipe() {
-    const swipeThreshold = 50;
-    const diff = touchStartX - touchEndX;
-
-    if (Math.abs(diff) > swipeThreshold) {
-        const currentScreen = document.querySelector('.screen.active').id;
-        if (diff > 0 && currentScreen === 'main-screen') {
-            // Свайп влево - на проекты
-            showScreen('projects');
-        } else if (diff < 0 && currentScreen === 'projects-screen') {
-            // Свайп вправо - на главную
-            showScreen('main');
-        }
-    }
+function viewProject(projectId) {
+    console.log('View project:', projectId);
 }
-
