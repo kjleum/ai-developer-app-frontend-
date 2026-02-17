@@ -1,4 +1,4 @@
-app_js = '''// AI Platform v5.0 - Минималистичный интерфейс с максимальными возможностями
+// AI Platform v5.0 - Минималистичный интерфейс с максимальными возможностями
 const CONFIG = {
     API_URL: localStorage.getItem('api_url') || 'https://ai-developer-api.onrender.com',
     WS_URL: localStorage.getItem('ws_url') || 'wss://ai-developer-api.onrender.com/ws',
@@ -34,7 +34,7 @@ function initApp() {
     setupEventListeners();
     applyTheme();
     loadInitialData();
-    
+
     // Автоматическое изменение высоты textarea
     const chatInput = document.getElementById('chat-input');
     if (chatInput) {
@@ -47,7 +47,7 @@ function initTelegram() {
         const tg = window.Telegram.WebApp;
         tg.ready();
         tg.expand();
-        
+
         if (tg.initDataUnsafe?.user) {
             state.user = {
                 id: tg.initDataUnsafe.user.id.toString(),
@@ -65,7 +65,7 @@ function loadUserData() {
         state.user = JSON.parse(saved);
         updateProfileUI();
     }
-    
+
     const savedSettings = localStorage.getItem('ai_platform_settings');
     if (savedSettings) {
         state.settings = { ...state.settings, ...JSON.parse(savedSettings) };
@@ -79,7 +79,7 @@ function setupEventListeners() {
             closeModal();
             closeContextPanel();
         }
-        
+
         // Ctrl/Cmd + K для фокуса на чат
         if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
             e.preventDefault();
@@ -114,7 +114,7 @@ function showSection(sectionName) {
     if (targetSection) {
         targetSection.classList.add('active');
         state.currentSection = sectionName;
-        
+
         // Специфичная логика для каждой секции
         switch(sectionName) {
             case 'projects':
@@ -141,7 +141,7 @@ function showSection(sectionName) {
 async function sendMessage() {
     const input = document.getElementById('chat-input');
     const message = input.value.trim();
-    
+
     if (!message || state.isGenerating) return;
 
     // Добавляем сообщение пользователя
@@ -156,7 +156,7 @@ async function sendMessage() {
     try {
         // Определяем намерение пользователя
         const intent = detectIntent(message);
-        
+
         // Отправляем на API
         const response = await fetch(`${CONFIG.API_URL}/chat`, {
             method: 'POST',
@@ -170,17 +170,17 @@ async function sendMessage() {
         });
 
         const data = await response.json();
-        
+
         hideGlobalProgress();
-        
+
         if (data.success) {
             addMessage(data.response, 'assistant', data.actions);
-            
+
             // Если есть предложенные действия, показываем их
             if (data.suggestions) {
                 showSuggestions(data.suggestions);
             }
-            
+
             // Если нужно переключиться в другой режим
             if (data.redirect) {
                 handleRedirect(data.redirect);
@@ -199,7 +199,7 @@ async function sendMessage() {
 
 function detectIntent(message) {
     const lower = message.toLowerCase();
-    
+
     if (lower.includes('создай') && (lower.includes('проект') || lower.includes('сайт') || lower.includes('приложение'))) {
         return 'create_project';
     }
@@ -215,7 +215,7 @@ function detectIntent(message) {
     if (lower.includes('бизнес-план') || lower.includes('бизнес план')) {
         return 'business_plan';
     }
-    
+
     return 'general';
 }
 
@@ -223,9 +223,9 @@ function addMessage(text, role, actions = []) {
     const container = document.getElementById('chat-messages');
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${role}`;
-    
+
     let content = `<div class="message-content">${formatMessage(text)}</div>`;
-    
+
     // Добавляем кнопки действий если есть
     if (actions && actions.length > 0) {
         content += '<div class="message-actions">';
@@ -234,11 +234,11 @@ function addMessage(text, role, actions = []) {
         });
         content += '</div>';
     }
-    
+
     messageDiv.innerHTML = content;
     container.appendChild(messageDiv);
     container.scrollTop = container.scrollHeight;
-    
+
     // Сохраняем в историю
     state.chatHistory.push({ text, role, timestamp: Date.now() });
 }
@@ -246,10 +246,10 @@ function addMessage(text, role, actions = []) {
 function formatMessage(text) {
     // Простое форматирование markdown
     return text
-        .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
-        .replace(/\\*(.*?)\\*/g, '<em>$1</em>')
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
         .replace(/`(.*?)`/g, '<code>$1</code>')
-        .replace(/\\n/g, '<br>');
+        .replace(/\n/g, '<br>');
 }
 
 function quickAction(actionType) {
@@ -261,7 +261,7 @@ function quickAction(actionType) {
         'business_plan': 'Создай бизнес-план для: ',
         'autonomous': 'Запусти автономный режим для задачи: '
     };
-    
+
     const input = document.getElementById('chat-input');
     input.value = prompts[actionType] || '';
     input.focus();
@@ -300,7 +300,7 @@ async function loadProjects() {
     try {
         const response = await fetch(`${CONFIG.API_URL}/projects?user_id=${state.user?.id}`);
         const data = await response.json();
-        
+
         state.projects = data.projects || [];
         renderProjects();
     } catch (error) {
@@ -310,7 +310,7 @@ async function loadProjects() {
 
 function renderProjects() {
     const container = document.getElementById('projects-list');
-    
+
     if (state.projects.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
@@ -321,7 +321,7 @@ function renderProjects() {
         `;
         return;
     }
-    
+
     container.innerHTML = state.projects.map(project => `
         <div class="project-card" onclick="openProject('${project.id}')">
             <div class="project-icon">${getProjectIcon(project.type)}</div>
@@ -353,14 +353,14 @@ function getProjectIcon(type) {
 function openProject(projectId) {
     const project = state.projects.find(p => p.id === projectId);
     if (!project) return;
-    
+
     state.currentProject = project;
     document.getElementById('project-detail-title').textContent = project.name;
-    
+
     // Переключаемся на детальный вид проекта
     document.getElementById('projects-section').classList.remove('active');
     document.getElementById('project-detail-section').classList.add('active');
-    
+
     // Загружаем структуру проекта
     loadProjectStructure(projectId);
 }
@@ -371,7 +371,7 @@ function showProjectTab(tabName) {
         btn.classList.remove('active');
     });
     event.target.classList.add('active');
-    
+
     // Показываем нужный контент
     document.querySelectorAll('.project-tab-content').forEach(content => {
         content.classList.remove('active');
@@ -383,7 +383,7 @@ async function loadProjectStructure(projectId) {
     try {
         const response = await fetch(`${CONFIG.API_URL}/projects/${projectId}/structure`);
         const data = await response.json();
-        
+
         // Заполняем файловое дерево
         renderFileTree(data.files);
     } catch (error) {
@@ -400,7 +400,7 @@ function renderFileNode(node, level = 0) {
     if (typeof node === 'string') {
         return `<div class="file-item" style="padding-left: ${level * 16}px" onclick="openFile('${node}')">📄 ${node}</div>`;
     }
-    
+
     let html = '';
     for (const [name, children] of Object.entries(node)) {
         html += `<div class="folder-item" style="padding-left: ${level * 16}px">📁 ${name}</div>`;
@@ -424,7 +424,7 @@ function showMediaType(type) {
         item.classList.remove('active');
     });
     event.target.closest('.media-nav-item').classList.add('active');
-    
+
     // Показываем нужный тип
     document.querySelectorAll('.media-type').forEach(el => {
         el.classList.remove('active');
@@ -438,9 +438,9 @@ async function generateImage() {
         showToast('Введите описание изображения');
         return;
     }
-    
+
     showGlobalProgress('Генерация изображения...');
-    
+
     try {
         const response = await fetch(`${CONFIG.API_URL}/media/image/generate`, {
             method: 'POST',
@@ -451,10 +451,10 @@ async function generateImage() {
                 size: document.getElementById('image-size').value
             })
         });
-        
+
         const data = await response.json();
         hideGlobalProgress();
-        
+
         if (data.success && data.image_url) {
             document.getElementById('image-result').innerHTML = `
                 <img src="${data.image_url}" alt="Generated" class="generated-image">
@@ -474,19 +474,19 @@ async function generateImage() {
 async function generateVideo() {
     const prompt = document.getElementById('video-prompt').value;
     if (!prompt) return;
-    
+
     showGlobalProgress('Генерация видео (это может занять несколько минут)...');
-    
+
     try {
         const response = await fetch(`${CONFIG.API_URL}/media/video/generate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prompt })
         });
-        
+
         const data = await response.json();
         hideGlobalProgress();
-        
+
         if (data.success) {
             document.getElementById('video-result').innerHTML = `
                 <video controls src="${data.video_url}"></video>
@@ -501,19 +501,19 @@ async function generateVideo() {
 async function textToSpeech() {
     const text = document.getElementById('audio-text').value;
     if (!text) return;
-    
+
     showGlobalProgress('Создание аудио...');
-    
+
     try {
         const response = await fetch(`${CONFIG.API_URL}/media/audio/tts`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text })
         });
-        
+
         const data = await response.json();
         hideGlobalProgress();
-        
+
         if (data.success) {
             document.getElementById('audio-result').innerHTML = `
                 <audio controls src="data:audio/wav;base64,${data.audio}"></audio>
@@ -532,7 +532,7 @@ function showDataTab(tabName) {
         btn.classList.remove('active');
     });
     event.target.classList.add('active');
-    
+
     document.querySelectorAll('.data-content').forEach(content => {
         content.classList.remove('active');
     });
@@ -543,7 +543,7 @@ async function loadCollections() {
     try {
         const response = await fetch(`${CONFIG.API_URL}/rag/collections?user_id=${state.user?.id}`);
         const data = await response.json();
-        
+
         state.collections = data.collections || [];
         renderCollections();
     } catch (error) {
@@ -565,10 +565,10 @@ async function sendRAGMessage() {
     const input = document.getElementById('rag-input-field');
     const message = input.value.trim();
     if (!message) return;
-    
+
     addRAGMessage(message, 'user');
     input.value = '';
-    
+
     try {
         const response = await fetch(`${CONFIG.API_URL}/rag/chat`, {
             method: 'POST',
@@ -578,7 +578,7 @@ async function sendRAGMessage() {
                 user_id: state.user?.id
             })
         });
-        
+
         const data = await response.json();
         if (data.success) {
             addRAGMessage(data.answer, 'assistant');
@@ -599,17 +599,17 @@ function addRAGMessage(text, role) {
 
 async function executeNLP(command) {
     showGlobalProgress('Обработка запроса...');
-    
+
     try {
         const response = await fetch(`${CONFIG.API_URL}/nlp/command`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ command, user_id: state.user?.id })
         });
-        
+
         const data = await response.json();
         hideGlobalProgress();
-        
+
         const container = document.getElementById('nlp-chat');
         container.innerHTML += `<div class="nlp-result"><strong>${command}</strong><pre>${JSON.stringify(data.result, null, 2)}</pre></div>`;
     } catch (error) {
@@ -624,7 +624,7 @@ async function loadWorkflows() {
     try {
         const response = await fetch(`${CONFIG.API_URL}/workflows?user_id=${state.user?.id}`);
         const data = await response.json();
-        
+
         state.workflows = data.workflows || [];
         renderWorkflows();
     } catch (error) {
@@ -634,7 +634,7 @@ async function loadWorkflows() {
 
 function renderWorkflows() {
     const container = document.getElementById('workflows-list');
-    
+
     if (state.workflows.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
@@ -644,7 +644,7 @@ function renderWorkflows() {
         `;
         return;
     }
-    
+
     container.innerHTML = state.workflows.map(wf => `
         <div class="workflow-card">
             <div class="workflow-info">
@@ -666,10 +666,10 @@ function createWorkflow() {
 
 function updateProfileUI() {
     if (!state.user) return;
-    
+
     document.getElementById('profile-name').textContent = state.user.first_name || state.user.username || 'Пользователь';
     document.getElementById('profile-email').textContent = state.user.email || '';
-    
+
     // Обновляем статистику
     document.getElementById('projects-count').textContent = state.projects.length;
     document.getElementById('requests-count').textContent = state.chatHistory.length;
@@ -702,7 +702,7 @@ function showToast(message, type = 'info') {
     toast.className = `toast ${type}`;
     toast.textContent = message;
     container.appendChild(toast);
-    
+
     setTimeout(() => {
         toast.remove();
     }, 3000);
@@ -821,7 +821,3 @@ function loadInitialData() {
         loadProjects();
     }
 }
-'''
-
-with open('/mnt/kimi/output/app.js', 'w', encoding='utf-8') as f:
-    f.write(app_js)

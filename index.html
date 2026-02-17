@@ -1,4 +1,4 @@
-index_html = '''<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
@@ -50,7 +50,7 @@ index_html = '''<!DOCTYPE html>
 
         <!-- Основной контент -->
         <main class="main-content">
-            
+
             <!-- 1. ЧАТ (Главный экран) -->
             <section id="chat-section" class="section active">
                 <div class="chat-container">
@@ -138,7 +138,7 @@ index_html = '''<!DOCTYPE html>
                     <h2>Проекты</h2>
                     <button class="btn-primary" onclick="createNewProject()">+ Новый проект</button>
                 </div>
-                
+
                 <div class="projects-grid" id="projects-list">
                     <!-- Проекты загружаются динамически -->
                 </div>
@@ -406,7 +406,7 @@ index_html = '''<!DOCTYPE html>
                         <h2>Автоматизация</h2>
                         <button class="btn-primary" onclick="createWorkflow()">+ Создать workflow</button>
                     </div>
-                    
+
                     <div class="workflows-list" id="workflows-list">
                         <div class="workflow-card">
                             <div class="workflow-trigger">
@@ -557,10 +557,4 @@ index_html = '''<!DOCTYPE html>
 
     <script src="app.js"></script>
 </body>
-</html>'''
-
-with open('/mnt/kimi/output/index.html', 'w', encoding='utf-8') as f:
-    f.write(index_html)
-
-print("✅ index.html создан")
-print(f"Размер: {len(index_html)} символов")
+</html>
