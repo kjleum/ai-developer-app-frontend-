@@ -1,784 +1,590 @@
-// AI Developer Platform v4.0 - Frontend (полная версия)
+app_js = '''// AI Platform v5.0 - Минималистичный интерфейс с максимальными возможностями
 const CONFIG = {
-    API_URL: 'https://ai-developer-api.onrender.com' // Замените на ваш реальный URL
+    API_URL: localStorage.getItem('api_url') || 'https://ai-developer-api.onrender.com',
+    WS_URL: localStorage.getItem('ws_url') || 'wss://ai-developer-api.onrender.com/ws',
+    VERSION: '5.0.0'
 };
 
 // Состояние приложения
 const state = {
     user: null,
-    currentStep: 1,
-    projectConfig: {
-        type: '',
-        name: '',
-        description: '',
-        features: [],
-        database: 'postgresql',
-        ai_provider: ''
+    currentSection: 'chat',
+    currentProject: null,
+    chatHistory: [],
+    projects: [],
+    workflows: [],
+    collections: [],
+    settings: {
+        theme: 'dark',
+        mode: 'simple', // simple, pro, autonomous
+        language: 'ru'
     },
-    providers: [],
-    examples: [],
-    currentCollection: 'default'
+    isGenerating: false,
+    contextPanelOpen: false
 };
 
 // Инициализация
-document.addEventListener('DOMContentLoaded', async () => {
-    initTelegram();
-    await initAuth();
-    loadData();
-    setupEventListeners();
-    updateUserInfo();
+document.addEventListener('DOMContentLoaded', () => {
+    initApp();
 });
+
+function initApp() {
+    initTelegram();
+    loadUserData();
+    setupEventListeners();
+    applyTheme();
+    loadInitialData();
+    
+    // Автоматическое изменение высоты textarea
+    const chatInput = document.getElementById('chat-input');
+    if (chatInput) {
+        chatInput.addEventListener('input', autoResizeTextarea);
+    }
+}
 
 function initTelegram() {
     if (window.Telegram?.WebApp) {
         const tg = window.Telegram.WebApp;
         tg.ready();
         tg.expand();
-        tg.setHeaderColor('#0a0a1a');
-        tg.setBackgroundColor('#0a0a1a');
-
-        if (!state.user) {
+        
+        if (tg.initDataUnsafe?.user) {
             state.user = {
-                id: tg.initDataUnsafe?.user?.id?.toString() || 'demo_' + Date.now(),
-                username: tg.initDataUnsafe?.user?.username || 'demo'
+                id: tg.initDataUnsafe.user.id.toString(),
+                username: tg.initDataUnsafe.user.username,
+                first_name: tg.initDataUnsafe.user.first_name
             };
-        }
-    } else {
-        if (!state.user) {
-            state.user = { id: 'web_' + Date.now(), username: 'web_user' };
-        }
-    }
-    console.log('User:', state.user);
-}
-
-async function initAuth() {
-    const token = localStorage.getItem('token');
-    if (token) {
-        try {
-            const res = await fetch(`${CONFIG.API_URL}/users/me`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            if (res.ok) {
-                const user = await res.json();
-                state.user = { email: user.email, token, ...user };
-            } else {
-                localStorage.removeItem('token');
-            }
-        } catch (e) {
-            localStorage.removeItem('token');
+            updateProfileUI();
         }
     }
 }
 
-function updateUserInfo() {
-    const infoSpan = document.getElementById('user-info');
-    if (state.user && state.user.email) {
-        infoSpan.textContent = state.user.email.split('@')[0] + ' ';
-    } else {
-        infoSpan.textContent = '';
+function loadUserData() {
+    const saved = localStorage.getItem('ai_platform_user');
+    if (saved) {
+        state.user = JSON.parse(saved);
+        updateProfileUI();
+    }
+    
+    const savedSettings = localStorage.getItem('ai_platform_settings');
+    if (savedSettings) {
+        state.settings = { ...state.settings, ...JSON.parse(savedSettings) };
     }
 }
 
-async function loadData() {
-    await Promise.all([
-        loadProviders(),
-        loadExamples(),
-        loadProjects()
-    ]);
-}
-
-async function loadProviders() {
-    try {
-        const res = await fetch(`${CONFIG.API_URL}/ai/providers`);
-        const data = await res.json();
-        state.providers = data.providers || [];
-        renderProviders();
-        document.getElementById('ai-count').textContent = 
-            state.providers.filter(p => p.available).length + '+';
-    } catch (e) {
-        console.error('Failed to load providers:', e);
-        document.getElementById('providers-list').innerHTML = 
-            '<p class="empty-state">Ошибка загрузки провайдеров</p>';
-    }
-}
-
-function renderProviders() {
-    const container = document.getElementById('providers-list');
-    if (!container) return;
-
-    const available = state.providers.filter(p => p.available);
-
-    container.innerHTML = available.slice(0, 4).map(p => `
-        <div class="provider-card available">
-            <div class="provider-name">${p.name}</div>
-            <div class="provider-status">${p.speed || 'быстрый'}</div>
-        </div>
-    `).join('') || '<p class="empty-state">Нет доступных провайдеров</p>';
-}
-
-async function loadExamples() {
-    try {
-        const res = await fetch(`${CONFIG.API_URL}/examples`);
-        const data = await res.json();
-        state.examples = data.examples || [];
-        renderExamples();
-    } catch (e) {
-        console.error('Failed to load examples:', e);
-        document.getElementById('examples-grid').innerHTML = 
-            '<p class="empty-state">Не удалось загрузить примеры</p>';
-    }
-}
-
-function renderExamples() {
-    const container = document.getElementById('examples-grid');
-    if (!container) return;
-
-    container.innerHTML = state.examples.map(ex => `
-        <div class="example-card" onclick="useExample('${ex.id}')">
-            <h3>${ex.icon || '💡'} ${ex.title}</h3>
-            <p>${ex.description}</p>
-        </div>
-    `).join('');
-}
-
-async function loadProjects() {
-    try {
-        const res = await fetch(`${CONFIG.API_URL}/projects?user_id=${state.user.id}`);
-        const data = await res.json();
-        renderProjects(data.projects || []);
-    } catch (e) {
-        console.error('Failed to load projects:', e);
-        document.getElementById('projects-list').innerHTML = 
-            '<p class="empty-state">Ошибка загрузки проектов</p>';
-    }
-}
-
-function renderProjects(projects) {
-    const container = document.getElementById('projects-list');
-    if (!container) return;
-
-    if (projects.length === 0) {
-        container.innerHTML = '<p class="empty-state">Нет проектов. Создайте первый!</p>';
-        return;
-    }
-
-    container.innerHTML = projects.map(p => `
-        <div class="project-item" onclick="viewProject('${p.id}')">
-            <div class="project-icon">📦</div>
-            <div class="project-info">
-                <h4>${p.config?.name || 'Без названия'}</h4>
-                <p>${p.status || 'Черновик'} • ${new Date(p.created_at).toLocaleDateString()}</p>
-            </div>
-        </div>
-    `).join('');
-}
-
-// Navigation
-function showScreen(screenId) {
-    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-    document.getElementById(screenId).classList.add('active');
-    window.scrollTo(0, 0);
-}
-
-// Auth
-function openAuth() {
-    if (state.user && state.user.email) {
-        if (confirm('Выйти из аккаунта?')) {
-            logout();
+function setupEventListeners() {
+    // Глобальные горячие клавиши
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeModal();
+            closeContextPanel();
         }
-        return;
-    }
-    showScreen('auth-screen');
-}
-
-function switchAuthTab(tab) {
-    document.getElementById('login-tab').classList.toggle('active', tab === 'login');
-    document.getElementById('register-tab').classList.toggle('active', tab === 'register');
-    document.getElementById('login-form').classList.toggle('active', tab === 'login');
-    document.getElementById('register-form').classList.toggle('active', tab === 'register');
-}
-
-async function login() {
-    const email = document.getElementById('login-email').value;
-    const password = document.getElementById('login-password').value;
-    if (!email || !password) return alert('Заполните поля');
-
-    try {
-        const formData = new FormData();
-        formData.append('username', email);
-        formData.append('password', password);
-        const res = await fetch(`${CONFIG.API_URL}/auth/login`, {
-            method: 'POST',
-            body: formData
-        });
-        const data = await res.json();
-        if (data.access_token) {
-            state.user = { email, token: data.access_token };
-            localStorage.setItem('token', data.access_token);
-            updateUserInfo();
-            showScreen('main-screen');
-        } else {
-            alert('Ошибка входа: ' + (data.detail || 'неверные данные'));
+        
+        // Ctrl/Cmd + K для фокуса на чат
+        if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+            e.preventDefault();
+            document.getElementById('chat-input')?.focus();
         }
-    } catch (e) {
-        alert('Ошибка соединения');
-    }
-}
-
-async function register() {
-    const name = document.getElementById('register-name').value;
-    const email = document.getElementById('register-email').value;
-    const pass = document.getElementById('register-password').value;
-    const pass2 = document.getElementById('register-password2').value;
-    if (!name || !email || !pass) return alert('Заполните все поля');
-    if (pass !== pass2) return alert('Пароли не совпадают');
-
-    try {
-        const res = await fetch(`${CONFIG.API_URL}/auth/register`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, email, password: pass })
-        });
-        const data = await res.json();
-        if (data.id) {
-            alert('Регистрация успешна! Теперь войдите.');
-            switchAuthTab('login');
-        } else {
-            alert('Ошибка: ' + (data.detail || 'не удалось зарегистрироваться'));
-        }
-    } catch (e) {
-        alert('Ошибка соединения');
-    }
-}
-
-function logout() {
-    state.user = null;
-    localStorage.removeItem('token');
-    updateUserInfo();
-    showScreen('main-screen');
-}
-
-// Features
-const featuresData = [
-    {
-        category: '🤖 AI (текст)',
-        items: ['Генерация', 'Чат', 'Суммаризация', 'Перевод', 'Анализ тональности', 'Исправление грамматики', 'Перефразирование', 'Генерация идей', 'Написание писем', 'Создание контента']
-    },
-    {
-        category: '💻 AI (код)',
-        items: ['Генерация кода', 'Объяснение кода', 'Рефакторинг', 'Поиск багов', 'Оптимизация', 'Документирование', 'Создание тестов', 'Конвертация между языками']
-    },
-    {
-        category: '🎨 Медиа',
-        items: ['Генерация изображений (SD, Kandinsky, DALL-E)', 'Upscale', 'Inpaint', 'Outpainting', 'Генерация видео', 'TTS (Coqui, Silero)', 'STT (Whisper)', 'Клонирование голоса', 'Создание музыки', '3D-модели']
-    },
-    {
-        category: '🧠 Агенты',
-        items: ['10+ предустановленных агентов', 'Кастомные агенты', 'Память', 'Инструменты (поиск, API, БД, файлы)']
-    },
-    {
-        category: '📚 RAG',
-        items: ['Загрузка документов (PDF, DOCX, TXT)', 'Индексация', 'Семантический поиск', 'Чат с документами', 'База знаний']
-    },
-    {
-        category: '💬 NLP для БД',
-        items: ['Естественно-языковые запросы', 'Создание таблиц', 'Графики', 'Отчёты', 'Аналитика']
-    },
-    {
-        category: '🏗️ Проекты',
-        items: ['20+ типов проектов', 'Настройка стека', 'Выбор БД', 'Добавление фич', 'Генерация Dockerfile, CI/CD, тесты, документация']
-    },
-    {
-        category: '🚀 Деплой',
-        items: ['GitHub', 'Render', 'Vercel', 'Netlify', 'Heroku', 'Собственный сервер']
-    },
-    {
-        category: '🔄 Самоисправление',
-        items: ['До 3 попыток исправления ошибок выполнения с помощью AI']
-    },
-    {
-        category: '📋 Интерактивный сбор требований',
-        items: ['Диалог с AI', 'Уточнение деталей', 'Примеры', 'Генерация структуры']
-    },
-    {
-        category: '👤 Личный кабинет',
-        items: ['Профиль', 'Аватар', 'Настройки', 'Баланс', 'История', 'API-ключи', 'Проекты']
-    },
-    {
-        category: '🔔 Уведомления',
-        items: ['Email', 'Telegram', 'Push', 'Внутриплатформенные']
-    }
-];
-
-function openFeatures() {
-    showScreen('features-screen');
-    renderFeatures();
-}
-
-function renderFeatures() {
-    const container = document.getElementById('features-list');
-    if (!container) return;
-    container.innerHTML = featuresData.map(cat => `
-        <div class="feature-category">
-            <h3>${cat.category}</h3>
-            <div class="feature-items">
-                ${cat.items.map(item => `<span class="feature-tag">${item}</span>`).join('')}
-            </div>
-        </div>
-    `).join('');
-}
-
-// Wizard
-function openWizard() {
-    state.currentStep = 1;
-    state.projectConfig = { 
-        type: '', 
-        name: '', 
-        description: '', 
-        features: [], 
-        database: 'postgresql', 
-        ai_provider: '' 
-    };
-    updateWizardStep();
-    document.querySelectorAll('.type-card').forEach(c => c.classList.remove('selected'));
-    showScreen('wizard-screen');
-}
-
-function selectProjectType(type) {
-    state.projectConfig.type = type;
-    document.querySelectorAll('.type-card').forEach(c => c.classList.remove('selected'));
-    document.querySelector(`.type-card[data-type="${type}"]`)?.classList.add('selected');
-}
-
-function updateWizardStep() {
-    document.querySelectorAll('.step').forEach((s, i) => {
-        s.classList.toggle('active', i + 1 === state.currentStep);
     });
 
-    document.querySelectorAll('.wizard-step-content').forEach((c, i) => {
-        c.classList.toggle('active', i + 1 === state.currentStep);
+    // Обработка Enter в чате
+    document.getElementById('chat-input')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+}
+
+// ==================== НАВИГАЦИЯ ====================
+
+function showSection(sectionName) {
+    // Обновляем активную кнопку в сайдбаре
+    document.querySelectorAll('.nav-item').forEach(item => {
+        item.classList.toggle('active', item.dataset.section === sectionName);
     });
 
-    document.getElementById('prev-step').style.display = state.currentStep > 1 ? 'block' : 'none';
-    document.getElementById('next-step').textContent = state.currentStep === 4 ? '✨ Создать' : 'Далее →';
-}
+    // Скрываем все секции
+    document.querySelectorAll('.section').forEach(section => {
+        section.classList.remove('active');
+    });
 
-function nextStep() {
-    if (state.currentStep === 1 && !state.projectConfig.type) {
-        alert('Выберите тип проекта');
-        return;
-    }
-    if (state.currentStep === 2) {
-        state.projectConfig.name = document.getElementById('project-name').value;
-        state.projectConfig.description = document.getElementById('project-description').value;
-        if (!state.projectConfig.name || !state.projectConfig.description) {
-            alert('Заполните название и описание');
-            return;
+    // Показываем нужную секцию
+    const targetSection = document.getElementById(`${sectionName}-section`);
+    if (targetSection) {
+        targetSection.classList.add('active');
+        state.currentSection = sectionName;
+        
+        // Специфичная логика для каждой секции
+        switch(sectionName) {
+            case 'projects':
+                loadProjects();
+                break;
+            case 'media':
+                loadMediaHistory();
+                break;
+            case 'data':
+                loadCollections();
+                break;
+            case 'automation':
+                loadWorkflows();
+                break;
+            case 'profile':
+                updateProfileUI();
+                break;
         }
     }
-
-    if (state.currentStep < 4) {
-        state.currentStep++;
-        updateWizardStep();
-        if (state.currentStep === 4) updateSummary();
-    } else {
-        createProject();
-    }
 }
 
-function prevStep() {
-    if (state.currentStep > 1) {
-        state.currentStep--;
-        updateWizardStep();
-    }
-}
-
-function selectDatabase(db) {
-    state.projectConfig.database = db;
-    document.querySelectorAll('.option-card').forEach(c => c.classList.remove('active'));
-    document.querySelector(`.option-card[data-db="${db}"]`).classList.add('active');
-}
-
-function updateSummary() {
-    const summary = document.getElementById('project-summary');
-    if (summary) {
-        summary.innerHTML = `
-            <div class="summary-item"><span>Тип:</span> <strong>${state.projectConfig.type}</strong></div>
-            <div class="summary-item"><span>Название:</span> <strong>${state.projectConfig.name}</strong></div>
-            <div class="summary-item"><span>Функций:</span> <strong>${state.projectConfig.features.length}</strong></div>
-            <div class="summary-item"><span>База данных:</span> <strong>${state.projectConfig.database}</strong></div>
-        `;
-    }
-}
-
-function addFeature() {
-    const name = document.getElementById('feature-name').value;
-    const priority = document.getElementById('feature-priority').value;
-
-    if (name) {
-        state.projectConfig.features.push({ name, priority });
-        renderFeaturesList();
-        document.getElementById('feature-name').value = '';
-    }
-}
-
-function quickAddFeature(name) {
-    state.projectConfig.features.push({ name, priority: 'should' });
-    renderFeaturesList();
-}
-
-function renderFeaturesList() {
-    const container = document.getElementById('features-list');
-    if (!container) return;
-
-    container.innerHTML = state.projectConfig.features.map((f, i) => `
-        <div class="feature-item">
-            <span class="feature-priority ${f.priority}">${f.priority}</span>
-            <span class="feature-name">${f.name}</span>
-            <button class="feature-delete" onclick="removeFeature(${i})">×</button>
-        </div>
-    `).join('');
-}
-
-function removeFeature(index) {
-    state.projectConfig.features.splice(index, 1);
-    renderFeaturesList();
-}
-
-async function createProject() {
-    showScreen('generating-screen');
-
-    try {
-        const res = await fetch(`${CONFIG.API_URL}/projects`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                user_id: state.user.id,
-                config: state.projectConfig
-            })
-        });
-
-        const data = await res.json();
-
-        if (data.success) {
-            await simulateProgress();
-            showResult(data.project_id);
-        } else {
-            throw new Error(data.detail || 'Failed to create project');
-        }
-    } catch (e) {
-        alert('Ошибка: ' + e.message);
-        showScreen('main-screen');
-    }
-}
-
-async function simulateProgress() {
-    const steps = ['analyze', 'architecture', 'code', 'deploy'];
-    const delays = [1500, 2000, 4000, 3000];
-
-    for (let i = 0; i < steps.length; i++) {
-        document.querySelectorAll('.progress-step').forEach((s, j) => {
-            s.classList.remove('active', 'completed');
-            if (j < i) s.classList.add('completed');
-            else if (j === i) s.classList.add('active');
-        });
-        document.getElementById('generating-status').textContent = 
-            `Шаг ${i+1}: ${steps[i]}...`;
-        await new Promise(r => setTimeout(r, delays[i]));
-    }
-}
-
-async function showResult(projectId) {
-    showScreen('result-screen');
-
-    try {
-        const res = await fetch(`${CONFIG.API_URL}/projects/${projectId}?user_id=${state.user.id}`);
-        const project = await res.json();
-
-        document.getElementById('result-project-name').textContent = project.config?.name || 'Project';
-
-        if (project.deploy_url) {
-            document.getElementById('result-deploy-url').href = project.deploy_url;
-            document.getElementById('deploy-url-text').textContent = project.deploy_url;
-        }
-        if (project.github_url) {
-            document.getElementById('result-github-url').href = project.github_url;
-        }
-
-        const files = Object.keys(project.files || {});
-        document.getElementById('files-list').innerHTML = files.map(f => 
-            `<span class="file-tag">${f}</span>`
-        ).join('');
-    } catch (e) {
-        console.error('Failed to load project:', e);
-        document.getElementById('files-list').innerHTML = '<p class="empty-state">Не удалось загрузить файлы</p>';
-    }
-}
-
-function useExample(exampleId) {
-    const example = state.examples.find(e => e.id === exampleId);
-    if (example) {
-        state.projectConfig = { ...state.projectConfig, ...example.config_preview };
-        state.projectConfig.name = example.title;
-        state.projectConfig.description = example.description;
-        openWizard();
-    }
-}
-
-function viewProject(projectId) {
-    showResult(projectId);
-}
-
-// Chat
-function openChat() {
-    showScreen('chat-screen');
-}
+// ==================== ЧАТ (ГЛАВНЫЙ ЭКРАН) ====================
 
 async function sendMessage() {
     const input = document.getElementById('chat-input');
     const message = input.value.trim();
-    if (!message) return;
+    
+    if (!message || state.isGenerating) return;
 
-    addChatMessage(message, 'user');
+    // Добавляем сообщение пользователя
+    addMessage(message, 'user');
     input.value = '';
+    autoResizeTextarea();
+
+    // Показываем индикатор загрузки
+    showGlobalProgress('AI думает...');
+    state.isGenerating = true;
 
     try {
-        const res = await fetch(`${CONFIG.API_URL}/ai/generate`, {
+        // Определяем намерение пользователя
+        const intent = detectIntent(message);
+        
+        // Отправляем на API
+        const response = await fetch(`${CONFIG.API_URL}/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                prompt: message,
-                provider: document.getElementById('chat-provider')?.value || null
+                message,
+                intent,
+                user_id: state.user?.id,
+                context: getChatContext()
             })
         });
 
-        const data = await res.json();
+        const data = await response.json();
+        
+        hideGlobalProgress();
+        
         if (data.success) {
-            addChatMessage(data.response, 'assistant');
+            addMessage(data.response, 'assistant', data.actions);
+            
+            // Если есть предложенные действия, показываем их
+            if (data.suggestions) {
+                showSuggestions(data.suggestions);
+            }
+            
+            // Если нужно переключиться в другой режим
+            if (data.redirect) {
+                handleRedirect(data.redirect);
+            }
         } else {
-            addChatMessage('Ошибка: ' + (data.detail || 'Неизвестная ошибка'), 'system');
+            addMessage('Извините, произошла ошибка. Попробуйте ещё раз.', 'system');
         }
-    } catch (e) {
-        addChatMessage('Ошибка соединения: ' + e.message, 'system');
+    } catch (error) {
+        hideGlobalProgress();
+        addMessage('Ошибка соединения. Проверьте интернет.', 'system');
+        console.error('Chat error:', error);
+    } finally {
+        state.isGenerating = false;
     }
 }
 
-function addChatMessage(text, role) {
+function detectIntent(message) {
+    const lower = message.toLowerCase();
+    
+    if (lower.includes('создай') && (lower.includes('проект') || lower.includes('сайт') || lower.includes('приложение'))) {
+        return 'create_project';
+    }
+    if (lower.includes('изображение') || lower.includes('картинку') || lower.includes('фото')) {
+        return 'generate_image';
+    }
+    if (lower.includes('код') || lower.includes('функцию') || lower.includes('скрипт')) {
+        return 'write_code';
+    }
+    if (lower.includes('анализ') || lower.includes('проверь')) {
+        return 'analyze';
+    }
+    if (lower.includes('бизнес-план') || lower.includes('бизнес план')) {
+        return 'business_plan';
+    }
+    
+    return 'general';
+}
+
+function addMessage(text, role, actions = []) {
     const container = document.getElementById('chat-messages');
-    const div = document.createElement('div');
-    div.className = `message ${role}`;
-    div.textContent = text;
-    container.appendChild(div);
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `message ${role}`;
+    
+    let content = `<div class="message-content">${formatMessage(text)}</div>`;
+    
+    // Добавляем кнопки действий если есть
+    if (actions && actions.length > 0) {
+        content += '<div class="message-actions">';
+        actions.forEach(action => {
+            content += `<button class="msg-action-btn" onclick="handleAction('${action.type}', '${action.data}')">${action.label}</button>`;
+        });
+        content += '</div>';
+    }
+    
+    messageDiv.innerHTML = content;
+    container.appendChild(messageDiv);
     container.scrollTop = container.scrollHeight;
+    
+    // Сохраняем в историю
+    state.chatHistory.push({ text, role, timestamp: Date.now() });
 }
 
-// Media
-function openMedia() {
-    showScreen('media-screen');
+function formatMessage(text) {
+    // Простое форматирование markdown
+    return text
+        .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
+        .replace(/\\*(.*?)\\*/g, '<em>$1</em>')
+        .replace(/`(.*?)`/g, '<code>$1</code>')
+        .replace(/\\n/g, '<br>');
 }
 
-function switchMediaTab(tab) {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.media-content').forEach(c => c.classList.remove('active'));
+function quickAction(actionType) {
+    const prompts = {
+        'create_project': 'Создай проект: ',
+        'analyze_file': 'Проанализируй этот файл: ',
+        'generate_image': 'Сгенерируй изображение: ',
+        'write_code': 'Напиши код для: ',
+        'business_plan': 'Создай бизнес-план для: ',
+        'autonomous': 'Запусти автономный режим для задачи: '
+    };
+    
+    const input = document.getElementById('chat-input');
+    input.value = prompts[actionType] || '';
+    input.focus();
+    autoResizeTextarea();
+}
 
-    document.querySelector(`.tab[onclick="switchMediaTab('${tab}')"]`).classList.add('active');
-    document.getElementById(`media-${tab}`).classList.add('active');
+function handleAction(type, data) {
+    switch(type) {
+        case 'accept_architecture':
+            showToast('Архитектура принята');
+            break;
+        case 'modify':
+            document.getElementById('chat-input').value = 'Измени: ';
+            document.getElementById('chat-input').focus();
+            break;
+        case 'simplify':
+            sendMessageDirect('Упрости эту архитектуру');
+            break;
+        case 'deepen':
+            sendMessageDirect('Добавь больше деталей');
+            break;
+        case 'create_project':
+            createProjectFromChat(data);
+            break;
+    }
+}
+
+async function sendMessageDirect(text) {
+    document.getElementById('chat-input').value = text;
+    await sendMessage();
+}
+
+// ==================== ПРОЕКТЫ ====================
+
+async function loadProjects() {
+    try {
+        const response = await fetch(`${CONFIG.API_URL}/projects?user_id=${state.user?.id}`);
+        const data = await response.json();
+        
+        state.projects = data.projects || [];
+        renderProjects();
+    } catch (error) {
+        console.error('Failed to load projects:', error);
+    }
+}
+
+function renderProjects() {
+    const container = document.getElementById('projects-list');
+    
+    if (state.projects.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <span class="empty-icon">📁</span>
+                <p>Нет проектов</p>
+                <button class="btn-primary" onclick="createNewProject()">Создать первый проект</button>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = state.projects.map(project => `
+        <div class="project-card" onclick="openProject('${project.id}')">
+            <div class="project-icon">${getProjectIcon(project.type)}</div>
+            <div class="project-info">
+                <h4>${project.name}</h4>
+                <p>${project.type} • ${project.stack || 'не указан'}</p>
+                <span class="project-status ${project.status}">${project.status}</span>
+            </div>
+            <div class="project-meta">
+                <small>${formatDate(project.updated_at)}</small>
+            </div>
+        </div>
+    `).join('');
+}
+
+function getProjectIcon(type) {
+    const icons = {
+        'api': '🔌',
+        'bot': '🤖',
+        'frontend': '🎨',
+        'fullstack': '⚡',
+        'saas': '☁️',
+        'mobile': '📱',
+        'default': '📦'
+    };
+    return icons[type] || icons.default;
+}
+
+function openProject(projectId) {
+    const project = state.projects.find(p => p.id === projectId);
+    if (!project) return;
+    
+    state.currentProject = project;
+    document.getElementById('project-detail-title').textContent = project.name;
+    
+    // Переключаемся на детальный вид проекта
+    document.getElementById('projects-section').classList.remove('active');
+    document.getElementById('project-detail-section').classList.add('active');
+    
+    // Загружаем структуру проекта
+    loadProjectStructure(projectId);
+}
+
+function showProjectTab(tabName) {
+    // Обновляем кнопки
+    document.querySelectorAll('.project-tabs .tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    event.target.classList.add('active');
+    
+    // Показываем нужный контент
+    document.querySelectorAll('.project-tab-content').forEach(content => {
+        content.classList.remove('active');
+    });
+    document.getElementById(`project-${tabName}`).classList.add('active');
+}
+
+async function loadProjectStructure(projectId) {
+    try {
+        const response = await fetch(`${CONFIG.API_URL}/projects/${projectId}/structure`);
+        const data = await response.json();
+        
+        // Заполняем файловое дерево
+        renderFileTree(data.files);
+    } catch (error) {
+        console.error('Failed to load project structure:', error);
+    }
+}
+
+function renderFileTree(files) {
+    const container = document.getElementById('file-tree');
+    container.innerHTML = renderFileNode(files);
+}
+
+function renderFileNode(node, level = 0) {
+    if (typeof node === 'string') {
+        return `<div class="file-item" style="padding-left: ${level * 16}px" onclick="openFile('${node}')">📄 ${node}</div>`;
+    }
+    
+    let html = '';
+    for (const [name, children] of Object.entries(node)) {
+        html += `<div class="folder-item" style="padding-left: ${level * 16}px">📁 ${name}</div>`;
+        html += renderFileNode(children, level + 1);
+    }
+    return html;
+}
+
+function createNewProject() {
+    // Возвращаемся в чат с шаблоном создания проекта
+    showSection('chat');
+    document.getElementById('chat-input').value = 'Создай проект: ';
+    document.getElementById('chat-input').focus();
+}
+
+// ==================== МЕДИА ====================
+
+function showMediaType(type) {
+    // Обновляем навигацию
+    document.querySelectorAll('.media-nav-item').forEach(item => {
+        item.classList.remove('active');
+    });
+    event.target.closest('.media-nav-item').classList.add('active');
+    
+    // Показываем нужный тип
+    document.querySelectorAll('.media-type').forEach(el => {
+        el.classList.remove('active');
+    });
+    document.getElementById(`media-${type}`).classList.add('active');
 }
 
 async function generateImage() {
     const prompt = document.getElementById('image-prompt').value;
-    if (!prompt) return;
-
-    const resultDiv = document.getElementById('image-result');
-    resultDiv.innerHTML = '<p>Генерация...</p>';
-
+    if (!prompt) {
+        showToast('Введите описание изображения');
+        return;
+    }
+    
+    showGlobalProgress('Генерация изображения...');
+    
     try {
-        const res = await fetch(`${CONFIG.API_URL}/media/image/generate`, {
+        const response = await fetch(`${CONFIG.API_URL}/media/image/generate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt })
+            body: JSON.stringify({
+                prompt,
+                model: document.getElementById('image-model').value,
+                size: document.getElementById('image-size').value
+            })
         });
-
-        const data = await res.json();
-        if (data.success && data.images?.[0]) {
-            resultDiv.innerHTML = `<img src="data:image/png;base64,${data.images[0]}" alt="Generated">`;
-        } else {
-            resultDiv.innerHTML = '<p class="error">Не удалось сгенерировать изображение</p>';
+        
+        const data = await response.json();
+        hideGlobalProgress();
+        
+        if (data.success && data.image_url) {
+            document.getElementById('image-result').innerHTML = `
+                <img src="${data.image_url}" alt="Generated" class="generated-image">
+                <div class="image-actions">
+                    <button onclick="downloadImage('${data.image_url}')">⬇️ Скачать</button>
+                    <button onclick="useInProject('${data.image_url}')">📁 В проект</button>
+                </div>
+            `;
+            addToMediaHistory('image', prompt, data.image_url);
         }
-    } catch (e) {
-        resultDiv.innerHTML = `<p class="error">Ошибка: ${e.message}</p>`;
+    } catch (error) {
+        hideGlobalProgress();
+        showToast('Ошибка генерации');
     }
 }
 
 async function generateVideo() {
     const prompt = document.getElementById('video-prompt').value;
     if (!prompt) return;
-
-    const resultDiv = document.getElementById('video-result');
-    resultDiv.innerHTML = '<p>Генерация видео... (может занять до 2 минут)</p>';
-
+    
+    showGlobalProgress('Генерация видео (это может занять несколько минут)...');
+    
     try {
-        const res = await fetch(`${CONFIG.API_URL}/media/video/generate`, {
+        const response = await fetch(`${CONFIG.API_URL}/media/video/generate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prompt })
         });
-
-        const data = await res.json();
-        if (data.success && data.video_url) {
-            resultDiv.innerHTML = `<video controls src="${data.video_url}"></video>`;
-        } else {
-            resultDiv.innerHTML = '<p class="error">Не удалось сгенерировать видео</p>';
+        
+        const data = await response.json();
+        hideGlobalProgress();
+        
+        if (data.success) {
+            document.getElementById('video-result').innerHTML = `
+                <video controls src="${data.video_url}"></video>
+            `;
         }
-    } catch (e) {
-        resultDiv.innerHTML = `<p class="error">Ошибка: ${e.message}</p>`;
+    } catch (error) {
+        hideGlobalProgress();
+        showToast('Ошибка генерации видео');
     }
 }
 
 async function textToSpeech() {
-    const text = document.getElementById('tts-text').value;
+    const text = document.getElementById('audio-text').value;
     if (!text) return;
-
-    const resultDiv = document.getElementById('audio-result');
-    resultDiv.innerHTML = '<p>Генерация...</p>';
-
+    
+    showGlobalProgress('Создание аудио...');
+    
     try {
-        const res = await fetch(`${CONFIG.API_URL}/media/audio/tts`, {
+        const response = await fetch(`${CONFIG.API_URL}/media/audio/tts`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text })
         });
-
-        const data = await res.json();
-        if (data.success && data.audio) {
-            resultDiv.innerHTML = `<audio controls src="data:audio/wav;base64,${data.audio}"></audio>`;
-        } else {
-            resultDiv.innerHTML = '<p class="error">Не удалось сгенерировать аудио</p>';
+        
+        const data = await response.json();
+        hideGlobalProgress();
+        
+        if (data.success) {
+            document.getElementById('audio-result').innerHTML = `
+                <audio controls src="data:audio/wav;base64,${data.audio}"></audio>
+            `;
         }
-    } catch (e) {
-        resultDiv.innerHTML = `<p class="error">Ошибка: ${e.message}</p>`;
+    } catch (error) {
+        hideGlobalProgress();
+        showToast('Ошибка генерации аудио');
     }
 }
 
-// Agents
-function openAgents() {
-    showScreen('agents-screen');
-    loadAgents();
-}
+// ==================== ДАННЫЕ (RAG) ====================
 
-async function loadAgents() {
-    try {
-        const res = await fetch(`${CONFIG.API_URL}/agents`);
-        const data = await res.json();
-
-        const container = document.getElementById('agents-list');
-        container.innerHTML = data.agents.map(a => `
-            <div class="agent-card" onclick="runAgent('${a.id}')">
-                <div class="agent-avatar">🤖</div>
-                <div class="agent-name">${a.name}</div>
-                <div class="agent-desc">${a.description}</div>
-            </div>
-        `).join('');
-    } catch (e) {
-        console.error('Failed to load agents:', e);
-        document.getElementById('agents-list').innerHTML = 
-            '<p class="empty-state">Не удалось загрузить агентов</p>';
-    }
-}
-
-async function runAgent(agentId) {
-    const input = prompt('Введите задачу для агента:');
-    if (!input) return;
-
-    try {
-        const res = await fetch(`${CONFIG.API_URL}/agents/${agentId}/run`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ input })
-        });
-
-        const data = await res.json();
-        alert(`Агент ${data.agent} ответил:\n\n${data.response}`);
-    } catch (e) {
-        alert('Ошибка: ' + e.message);
-    }
-}
-
-// RAG
-function openRAG() {
-    showScreen('rag-screen');
-    loadCollections();
+function showDataTab(tabName) {
+    document.querySelectorAll('.data-nav-btn').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    event.target.classList.add('active');
+    
+    document.querySelectorAll('.data-content').forEach(content => {
+        content.classList.remove('active');
+    });
+    document.getElementById(`data-${tabName}`).classList.add('active');
 }
 
 async function loadCollections() {
     try {
-        const res = await fetch(`${CONFIG.API_URL}/rag/collections?user_id=${state.user.id}`);
-        const data = await res.json();
-        const container = document.getElementById('collections-list');
-        container.innerHTML = data.collections.map(c => `
-            <button class="collection-card ${c.name === state.currentCollection ? 'active' : ''}" onclick="selectCollection('${c.name}')">
-                <span class="collection-name">📁 ${c.name}</span>
-                <span class="collection-count">${c.count} документов</span>
-            </button>
-        `).join('');
-    } catch (e) {
-        console.error('Failed to load collections:', e);
+        const response = await fetch(`${CONFIG.API_URL}/rag/collections?user_id=${state.user?.id}`);
+        const data = await response.json();
+        
+        state.collections = data.collections || [];
+        renderCollections();
+    } catch (error) {
+        console.error('Failed to load collections:', error);
     }
 }
 
-function selectCollection(name) {
-    state.currentCollection = name;
-    loadCollections();
-}
-
-async function createCollection() {
-    const name = prompt('Введите название новой коллекции:');
-    if (!name) return;
-
-    try {
-        const res = await fetch(`${CONFIG.API_URL}/rag/collections`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_id: state.user.id, name })
-        });
-        const data = await res.json();
-        if (data.success) {
-            loadCollections();
-        } else {
-            alert('Ошибка создания коллекции');
-        }
-    } catch (e) {
-        alert('Ошибка: ' + e.message);
-    }
+function renderCollections() {
+    const container = document.getElementById('collections-list');
+    container.innerHTML = state.collections.map(col => `
+        <div class="collection-item" onclick="selectCollection('${col.name}')">
+            <span>📁</span> ${col.name}
+            <small>${col.count} документов</small>
+        </div>
+    `).join('');
 }
 
 async function sendRAGMessage() {
-    const input = document.getElementById('rag-input');
+    const input = document.getElementById('rag-input-field');
     const message = input.value.trim();
     if (!message) return;
-
+    
     addRAGMessage(message, 'user');
     input.value = '';
-
+    
     try {
-        const res = await fetch(`${CONFIG.API_URL}/rag/chat`, {
+        const response = await fetch(`${CONFIG.API_URL}/rag/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                collection: state.currentCollection, 
+            body: JSON.stringify({
                 query: message,
-                user_id: state.user.id
+                user_id: state.user?.id
             })
         });
-
-        const data = await res.json();
+        
+        const data = await response.json();
         if (data.success) {
             addRAGMessage(data.answer, 'assistant');
-        } else {
-            addRAGMessage('Не удалось получить ответ', 'system');
         }
-    } catch (e) {
-        addRAGMessage('Ошибка: ' + e.message, 'system');
+    } catch (error) {
+        addRAGMessage('Ошибка получения ответа', 'system');
     }
 }
 
@@ -791,70 +597,231 @@ function addRAGMessage(text, role) {
     container.scrollTop = container.scrollHeight;
 }
 
-// NLP
-function openNLP() {
-    showScreen('nlp-screen');
-}
-
-function executeNLP(command) {
-    document.getElementById('nlp-input').value = command;
-    sendNLPMessage();
-}
-
-async function sendNLPMessage() {
-    const input = document.getElementById('nlp-input');
-    const message = input.value.trim();
-    if (!message) return;
-
-    addNLPMessage(message, 'user');
-    input.value = '';
-
+async function executeNLP(command) {
+    showGlobalProgress('Обработка запроса...');
+    
     try {
-        const res = await fetch(`${CONFIG.API_URL}/nlp/command`, {
+        const response = await fetch(`${CONFIG.API_URL}/nlp/command`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: message, user_id: state.user.id })
+            body: JSON.stringify({ command, user_id: state.user?.id })
         });
-
-        const data = await res.json();
-        if (data.success) {
-            addNLPMessage(JSON.stringify(data.result, null, 2), 'assistant');
-        } else {
-            addNLPMessage(data.result?.answer || 'Не удалось выполнить команду', 'assistant');
-        }
-    } catch (e) {
-        addNLPMessage('Ошибка: ' + e.message, 'system');
+        
+        const data = await response.json();
+        hideGlobalProgress();
+        
+        const container = document.getElementById('nlp-chat');
+        container.innerHTML += `<div class="nlp-result"><strong>${command}</strong><pre>${JSON.stringify(data.result, null, 2)}</pre></div>`;
+    } catch (error) {
+        hideGlobalProgress();
+        showToast('Ошибка выполнения команды');
     }
 }
 
-function addNLPMessage(text, role) {
-    const container = document.getElementById('nlp-messages');
-    const div = document.createElement('div');
-    div.className = `message ${role}`;
-    div.style.whiteSpace = 'pre-wrap';
-    div.textContent = text;
-    container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
+// ==================== АВТОМАТИЗАЦИЯ ====================
+
+async function loadWorkflows() {
+    try {
+        const response = await fetch(`${CONFIG.API_URL}/workflows?user_id=${state.user?.id}`);
+        const data = await response.json();
+        
+        state.workflows = data.workflows || [];
+        renderWorkflows();
+    } catch (error) {
+        console.error('Failed to load workflows:', error);
+    }
 }
 
-// Event Listeners
-function setupEventListeners() {
-    document.getElementById('refresh-providers')?.addEventListener('click', loadProviders);
-    document.getElementById('refresh-examples')?.addEventListener('click', loadExamples);
-    document.getElementById('refresh-projects')?.addEventListener('click', loadProjects);
-
-    document.getElementById('chat-input')?.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
-    });
-
-    document.getElementById('rag-input')?.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') sendRAGMessage();
-    });
-
-    document.getElementById('nlp-input')?.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') sendNLPMessage();
-    });
+function renderWorkflows() {
+    const container = document.getElementById('workflows-list');
+    
+    if (state.workflows.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <p>Нет workflow</p>
+                <button class="btn-primary" onclick="createWorkflow()">Создать первый</button>
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = state.workflows.map(wf => `
+        <div class="workflow-card">
+            <div class="workflow-info">
+                <h4>${wf.name}</h4>
+                <p>${wf.trigger} → ${wf.actions.join(' → ')}</p>
+            </div>
+            <div class="workflow-status ${wf.active ? 'active' : 'paused'}">
+                ${wf.active ? '● Активен' : '⏸️ На паузе'}
+            </div>
+        </div>
+    `).join('');
 }
+
+function createWorkflow() {
+    document.getElementById('workflow-builder').classList.remove('hidden');
+}
+
+// ==================== ПРОФИЛЬ ====================
+
+function updateProfileUI() {
+    if (!state.user) return;
+    
+    document.getElementById('profile-name').textContent = state.user.first_name || state.user.username || 'Пользователь';
+    document.getElementById('profile-email').textContent = state.user.email || '';
+    
+    // Обновляем статистику
+    document.getElementById('projects-count').textContent = state.projects.length;
+    document.getElementById('requests-count').textContent = state.chatHistory.length;
+}
+
+function addApiKey(provider) {
+    const key = prompt(`Введите API ключ для ${provider}:`);
+    if (key) {
+        // Сохраняем ключ (в реальном приложении - безопасно)
+        localStorage.setItem(`api_key_${provider}`, key);
+        showToast(`Ключ ${provider} добавлен`);
+    }
+}
+
+// ==================== УТИЛИТЫ ====================
+
+function showGlobalProgress(text) {
+    const progress = document.getElementById('global-progress');
+    progress.querySelector('.progress-text').textContent = text;
+    progress.classList.remove('hidden');
+}
+
+function hideGlobalProgress() {
+    document.getElementById('global-progress').classList.add('hidden');
+}
+
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    
+    setTimeout(() => {
+        toast.remove();
+    }, 3000);
+}
+
+function showModal(content) {
+    document.getElementById('modal-content').innerHTML = content;
+    document.getElementById('modal-overlay').classList.remove('hidden');
+}
+
+function closeModal() {
+    document.getElementById('modal-overlay').classList.add('hidden');
+}
+
+function showContextPanel(content) {
+    document.getElementById('context-content').innerHTML = content;
+    document.getElementById('context-panel').classList.remove('hidden');
+    state.contextPanelOpen = true;
+}
+
+function closeContextPanel() {
+    document.getElementById('context-panel').classList.add('hidden');
+    state.contextPanelOpen = false;
+}
+
+function autoResizeTextarea() {
+    const textarea = document.getElementById('chat-input');
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
+}
+
+function toggleTheme() {
+    state.settings.theme = state.settings.theme === 'dark' ? 'light' : 'dark';
+    applyTheme();
+    localStorage.setItem('ai_platform_settings', JSON.stringify(state.settings));
+}
+
+function applyTheme() {
+    document.body.classList.toggle('light-theme', state.settings.theme === 'light');
+}
+
+function formatDate(timestamp) {
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    return date.toLocaleDateString('ru-RU');
+}
+
+function getChatContext() {
+    // Берём последние 10 сообщений для контекста
+    return state.chatHistory.slice(-10);
+}
+
+function handleRedirect(redirect) {
+    switch(redirect.type) {
+        case 'project':
+            showSection('projects');
+            break;
+        case 'media':
+            showSection('media');
+            break;
+        case 'automation':
+            showSection('automation');
+            break;
+    }
+}
+
+function showAttachMenu() {
+    showModal(`
+        <h3>Прикрепить</h3>
+        <div class="attach-options">
+            <button onclick="attachFile('file')">📁 Файл</button>
+            <button onclick="attachFile('code')">💻 Код</button>
+            <button onclick="attachFile('url')">🔗 URL</button>
+            <button onclick="attachFile('db')">🗄️ База данных</button>
+        </div>
+    `);
+}
+
+function attachFile(type) {
+    closeModal();
+    showToast(`Прикрепление ${type}...`);
+}
+
+function clearChat() {
+    if (confirm('Очистить историю чата?')) {
+        document.getElementById('chat-messages').innerHTML = '';
+        state.chatHistory = [];
+    }
+}
+
+function showChatHistory() {
+    // Показываем историю чатов
+    showModal(`
+        <h3>История чатов</h3>
+        <div class="chat-history-list">
+            ${state.chatHistory.map(msg => `
+                <div class="history-item ${msg.role}">
+                    <small>${new Date(msg.timestamp).toLocaleString()}</small>
+                    <p>${msg.text.substring(0, 100)}...</p>
+                </div>
+            `).join('')}
+        </div>
+    `);
+}
+
+function cancelOperation() {
+    state.isGenerating = false;
+    hideGlobalProgress();
+    showToast('Операция отменена');
+}
+
+// Инициализация данных при загрузке
+function loadInitialData() {
+    // Загружаем базовые данные
+    if (state.user) {
+        loadProjects();
+    }
+}
+'''
+
+with open('/mnt/kimi/output/app.js', 'w', encoding='utf-8') as f:
+    f.write(app_js)
