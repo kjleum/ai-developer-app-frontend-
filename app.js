@@ -952,7 +952,12 @@ function collectAllMedia(){
   return items;
 }
 
-function findProjectIdByChat
+function findProjectIdByChat(chatId){
+  for(const [pid, arr] of Object.entries(state.chats)){
+    if((arr||[]).some(c=>c.id===chatId)) return pid;
+  }
+  return null;
+}
 
 function findAttachmentById(attId){
   for(const arr of Object.values(state.chats)){
@@ -967,12 +972,6 @@ function findAttachmentById(attId){
   return null;
 }
 
-(chatId){
-  for(const [pid, arr] of Object.entries(state.chats)){
-    if((arr||[]).some(c=>c.id===chatId)) return pid;
-  }
-  return null;
-}
 
 /* ----------------------- Views ----------------------- */
 function view(){
