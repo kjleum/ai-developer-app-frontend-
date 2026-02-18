@@ -33,6 +33,67 @@ const CLOUD = {
   }
 };
 
+
+/* ----------------------- IndexedDB (attachments storage) ----------------------- */
+/**
+ * localStorage is too small for real files; we store small blobs in IndexedDB.
+ * We persist only when file size <= max_inline_mb and file type is previewable.
+ */
+const IDB = {
+  _db:null,
+  async open(){
+    if(this._db) return this._db;
+    return new Promise((resolve,reject)=>{
+      const req = indexedDB.open("aiplatform", 1);
+      req.onupgradeneeded = ()=> {
+        const db = req.result;
+        if(!db.objectStoreNames.contains("blobs")){
+          db.createObjectStore("blobs");
+        }
+      };
+      req.onsuccess = ()=> { this._db = req.result; resolve(this._db); };
+      req.onerror = ()=> reject(req.error);
+    });
+  },
+  async set(key, blob){
+    const db = await this.open();
+    return new Promise((resolve,reject)=>{
+      const tx = db.transaction("blobs","readwrite");
+      tx.objectStore("blobs").put(blob, key);
+      tx.oncomplete = ()=> resolve(true);
+      tx.onerror = ()=> reject(tx.error);
+    });
+  },
+  async get(key){
+    const db = await this.open();
+    return new Promise((resolve,reject)=>{
+      const tx = db.transaction("blobs","readonly");
+      const req = tx.objectStore("blobs").get(key);
+      req.onsuccess = ()=> resolve(req.result || null);
+      req.onerror = ()=> reject(req.error);
+    });
+  },
+  async del(key){
+    const db = await this.open();
+    return new Promise((resolve,reject)=>{
+      const tx = db.transaction("blobs","readwrite");
+      tx.objectStore("blobs").delete(key);
+      tx.oncomplete = ()=> resolve(true);
+      tx.onerror = ()=> reject(tx.error);
+    });
+  },
+  async clear(){
+    const db = await this.open();
+    return new Promise((resolve,reject)=>{
+      const tx = db.transaction("blobs","readwrite");
+      tx.objectStore("blobs").clear();
+      tx.oncomplete = ()=> resolve(true);
+      tx.onerror = ()=> reject(tx.error);
+    });
+  }
+};
+
+
 /* ----------------------- App state ----------------------- */
 const state = {
   ready:false,
@@ -629,11 +690,13 @@ function openImportModal(){
   showModal("Импорт", c);
 }
 
-function resetLocalData(){
-  const keys = ["projects","activeProjectId","chats","activeChatId","settings","model","apiBase"];
+async function resetLocalData(){
+  const keys = ["projects","activeProjectId","chats","activeChatId","settings","model","apiBase","token"];
   keys.forEach(k=> LS.del(k));
+  try{ await IDB.clear(); }catch{}
   location.reload();
 }
+
 
 /* ----------------------- Utilities ----------------------- */
 function downloadBlob(blob, filename){
@@ -649,7 +712,69 @@ function copyText(text){
   navigator.clipboard?.writeText(text).then(()=> toast("Скопировано")).catch(()=> toast("Не удалось скопировать", false));
 }
 
-/* ----------------------- Chat logic ----------------------- */
+/* ----------------------- Chat logic
+
+async function openAttachmentModal(att){
+  try{
+    const blob = await IDB.get(att.storageKey || att.id);
+    if(!blob){
+      toast("Файл не найден локально. Для полного медиа нужно хранение/бэкенд.", false, 3200);
+      return;
+    }
+    const kind = att.previewKind || isPreviewableFile(blob) || (att.type?.startsWith("image/")?"image":(att.type==="application/pdf"?"pdf":null));
+    const url = URL.createObjectURL(blob);
+
+    const c = el("div","col");
+    if(kind==="image"){
+      const img = new Image();
+      img.src = url;
+      img.style.width="100%";
+      img.style.borderRadius="14px";
+      img.style.border="1px solid var(--line)";
+      c.appendChild(img);
+    }else if(kind==="pdf"){
+      const frame = el("iframe","");
+      frame.src = url;
+      frame.style.width="100%";
+      frame.style.height="72vh";
+      frame.style.border="1px solid var(--line)";
+      frame.style.borderRadius="14px";
+      c.appendChild(frame);
+    }else{
+      const txt = await blob.text().catch(()=> "");
+      const pre = el("pre","");
+      pre.style.whiteSpace="pre-wrap";
+      pre.style.margin="0";
+      pre.style.fontSize="12px";
+      pre.textContent = txt.slice(0, 200_000);
+      c.appendChild(pre);
+    }
+
+    const row = el("div","row");
+    row.style.flexWrap="wrap";
+    const dl = el("button","btn primary"); dl.textContent="Скачать";
+    dl.onclick = ()=> downloadBlob(blob, att.name || "file");
+    const toChat = el("button","btn"); toChat.textContent="В вложения";
+    toChat.onclick = ()=>{
+      // Recreate File and attach to current composer (kept in memory)
+      const f = new File([blob], att.name || "file", {type: att.type || blob.type || "application/octet-stream"});
+      state.attachments.push(fileToAttachment(f));
+      toast("Добавлено в вложения");
+      go("chat/"+state.activeChatId);
+      setTimeout(()=> renderPendingAttachments(), 60);
+    };
+    row.appendChild(dl);
+    row.appendChild(toChat);
+    c.appendChild(el("div","hr"));
+    c.appendChild(row);
+
+    const {close} = showModal(att.name || "Файл", c, {onClose: ()=>{ try{ URL.revokeObjectURL(url); }catch{} }});
+  }catch(e){
+    toast("Не удалось открыть файл: "+e.message, false, 3200);
+  }
+}
+
+ ----------------------- */
 function createChat(){
   ensureProject();
   const arr = state.chats[state.activeProjectId];
@@ -761,26 +886,55 @@ function sendCurrentChatToBot(){
 }
 
 /* ----------------------- Attachments & Media ----------------------- */
+
+function isPreviewableFile(file){
+  const t = file.type || "";
+  if(t.startsWith("image/")) return "image";
+  if(t === "application/pdf") return "pdf";
+  if(t.startsWith("text/") || t === "application/json" || t === "application/xml") return "text";
+  return null;
+}
+async function maybePersistAttachmentBlob(att){
+  // Persist to IDB only if previewable and small enough
+  try{
+    const f = att._file;
+    if(!f) return false;
+    const kind = isPreviewableFile(f);
+    if(!kind) return false;
+
+    const maxInline = (state.settings.max_inline_mb || 4) * 1024 * 1024;
+    if(f.size > maxInline) return false;
+
+    await IDB.set(att.storageKey, f);
+    att.previewKind = kind;
+    return true;
+  }catch{
+    return false;
+  }
+}
+
 function fileToAttachment(file){
+  const id = uid();
   return {
-    id: uid(),
+    id,
+    storageKey: id, // key for IndexedDB blob store
     name: file.name,
     type: file.type || "application/octet-stream",
     size: file.size,
     lastModified: file.lastModified,
-    // We keep File object in memory only for the pending send; for saved messages we store "meta" only
+    previewKind: null, // image|pdf|text if stored in IDB
+    // We keep File object in memory only for the pending send; for saved messages we store meta + storageKey
     _file: file,
-    // for previews we can create objectURL
+    // session preview (not persisted)
     _url: URL.createObjectURL(file)
   };
 }
 
 function normalizeSavedAttachment(att){
-  // remove _file, keep url only if small enough & it's an image/video
+  // Persist only metadata + storageKey (blob lives in IndexedDB, if saved)
   const out = {...att};
   delete out._file;
-  // do not persist object URLs (they are session-scoped)
-  delete out._url;
+  delete out._url; // object URLs are session-scoped
   return out;
 }
 
@@ -798,7 +952,22 @@ function collectAllMedia(){
   return items;
 }
 
-function findProjectIdByChat(chatId){
+function findProjectIdByChat
+
+function findAttachmentById(attId){
+  for(const arr of Object.values(state.chats)){
+    for(const c of (arr||[])){
+      for(const m of (c.messages||[])){
+        for(const a of (m.attachments||[])){
+          if(a.id === attId) return a;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+(chatId){
   for(const [pid, arr] of Object.entries(state.chats)){
     if((arr||[]).some(c=>c.id===chatId)) return pid;
   }
@@ -883,10 +1052,17 @@ function chatView(chatId=null){
       bubble.appendChild(meta);
 
       const body = el("div","");
-      if(state.settings.markdown && m.role!=="user" && m.role!=="system"){
-        body.innerHTML = renderMarkdownBasic(m.text||"");
+      const txt = (m.text||"");
+      if(m.role==="ai" && !txt.trim()){
+        // skeleton while streaming/empty
+        const s1 = el("div","skel"); s1.style.height="12px"; s1.style.width="72%";
+        const s2 = el("div","skel"); s2.style.height="12px"; s2.style.width="88%"; s2.style.marginTop="10px";
+        const s3 = el("div","skel"); s3.style.height="12px"; s3.style.width="64%"; s3.style.marginTop="10px";
+        body.appendChild(s1); body.appendChild(s2); body.appendChild(s3);
+      }else if(state.settings.markdown && m.role!=="user" && m.role!=="system"){
+        body.innerHTML = renderMarkdownBasic(txt);
       }else{
-        body.textContent = m.text || "";
+        body.textContent = txt;
       }
       bubble.appendChild(body);
 
@@ -962,6 +1138,10 @@ function chatView(chatId=null){
   clearBtn.textContent="Очистить чат";
   clearBtn.onclick = ()=>{
     if(!confirm("Очистить сообщения в этом чате?")) return;
+    // cleanup blobs for this chat
+    try{
+      (chat.messages||[]).forEach(m=> (m.attachments||[]).forEach(a=> { try{ IDB.del(a.storageKey||a.id); }catch{} }));
+    }catch{}
     chat.messages = [];
     persistAll();
     toast("Чат очищен");
@@ -1047,6 +1227,16 @@ function chatView(chatId=null){
       toast("Поделиться: готово");
     };
 
+    // open attachments (from chat bubbles)
+    $$("button[data-open]", w).forEach(b=>{
+      b.onclick = ()=>{
+        const id = b.getAttribute("data-open");
+        const a = findAttachmentById(id);
+        if(a) openAttachmentModal(a);
+        else toast("Вложение не найдено", false);
+      };
+    });
+
   },0);
 
   function doSend(){
@@ -1091,6 +1281,7 @@ function renderPendingAttachments(){
       const idx = state.attachments.findIndex(x=>x.id===id);
       if(idx>=0){
         try{ URL.revokeObjectURL(state.attachments[idx]._url); }catch{}
+        try{ IDB.del(state.attachments[idx].storageKey || state.attachments[idx].id); }catch{}
         state.attachments.splice(idx,1);
         renderPendingAttachments();
         syncTgButtons();
@@ -1099,23 +1290,32 @@ function renderPendingAttachments(){
   });
 }
 
-function addAttachments(files){
+async function addAttachments(files){
   if(!files?.length) return;
   const maxInline = (state.settings.max_inline_mb || 4) * 1024 * 1024;
-  files.forEach(f=>{
-    // Keep any file as metadata; inline previews only for small media
+
+  for(const f of files){
     const a = fileToAttachment(f);
+
     if(f.size > maxInline){
-      // We still attach as meta, but warn
       toast(`Файл ${f.name} слишком большой для inline-превью, прикреплён как метаданные`, true, 2600);
+    }else{
+      // Try store for later preview (images/pdf/text)
+      const ok = await maybePersistAttachmentBlob(a);
+      if(ok && a.previewKind){
+        toast(`Файл ${f.name} сохранён для предпросмотра`, true, 1600);
+      }
     }
+
     state.attachments.push(a);
-  });
+  }
+
   persistAll();
   renderPendingAttachments();
   haptic("select");
   syncTgButtons();
 }
+
 
 function projectsView(){
   ensureProject();
@@ -1254,7 +1454,10 @@ function mediaView(){
   setTimeout(()=>{
     $$("button[data-open]", w).forEach(b=>{
       b.onclick = ()=> {
-        toast("Открытие возможно для inline-превью. Для полноценного просмотра нужно хранение/бэкенд.", true, 3000);
+        const id=b.getAttribute("data-open");
+        const a = items.find(x=>x.id===id) || findAttachmentById(id);
+        if(a) openAttachmentModal(a);
+        else toast("Вложение не найдено", false);
       };
     });
     $$("button[data-send]", w).forEach(b=>{
@@ -1476,7 +1679,7 @@ function diagnosticsView(){
 
 function buildDiagnostics(){
   return {
-    version: "tma-spa-1",
+    version: "tma-spa-3",
     ts: new Date().toISOString(),
     tg: tg ? {
       platform: tg.platform,
