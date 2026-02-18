@@ -93,3 +93,25 @@ button,input,select,textarea{font:inherit}
 .msg.user{margin-left:auto; background:rgba(96,165,250,.12); border:1px solid rgba(96,165,250,.25)}
 .msg.ai{background:rgba(255,255,255,.03); border:1px solid var(--line)}
 .small{font-size:12px}
+
+/* Theme (data-theme) */
+html[data-theme="light"]{
+  --bg:#f8fafc; --panel:#ffffff; --card:#ffffff; --text:#0b1220; --muted:#475569;
+  --line:#e2e8f0; --accent:#2563eb; --danger:#e11d48; --ok:#16a34a;
+}
+
+/* Chat extras */
+.chatlog{max-height:60vh; overflow:auto; display:flex; flex-direction:column; gap:10px}
+.msg{padding:10px 12px; border-radius:12px; border:1px solid var(--line); white-space:pre-wrap; word-break:break-word}
+.msg.user{align-self:flex-end; background:rgba(96,165,250,.12)}
+.msg.ai{align-self:flex-start; background:rgba(255,255,255,.03)}
+.msg.hit{outline:2px solid rgba(96,165,250,.35)}
+
+pre.code{white-space:pre-wrap; word-break:break-word; padding:10px 12px; border-radius:12px; border:1px solid var(--line); background:rgba(0,0,0,.18); overflow:auto}
+html[data-theme="light"] pre.code{background:rgba(2,6,23,.06)}
+code.icode{padding:1px 6px; border-radius:8px; border:1px solid var(--line); background:rgba(0,0,0,.15)}
+html[data-theme="light"] code.icode{background:rgba(2,6,23,.06)}
+
+details summary{cursor:pointer}
+.small{font-size:12px}
+.list{display:flex; flex-direction:column; gap:10px}
