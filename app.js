@@ -1,1814 +1,1259 @@
-/* AI Platform Frontend (Telegram Mini App + Web)
-   - Guest mode works (chat demo + local projects)
-   - Auth-required pages gated
-   - Extra utilities: export/import, theme toggle, diagnostics, shortcuts, chat settings, local caching, search
+/* AI Platform Frontend (static, Telegram Mini App + Web)
+   - Guest mode: Chat (DEMO) + Local Projects + Local Settings + Media tools
+   - Auth mode: uses /api/v1 backend when token exists
 */
 
+// --- helpers
 const tg = window.Telegram?.WebApp || null;
 const $ = (s, r = document) => r.querySelector(s);
-const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
-const el = (tag, cls) => {
-  const n = document.createElement(tag);
-  if (cls) n.className = cls;
-  return n;
-};
-const esc = (s) =>
-  String(s ?? "").replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[m]));
+const el = (tag, cls) => { const n = document.createElement(tag); if (cls) n.className = cls; return n; };
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-// ---------- Storage helpers ----------
-const store = {
-  get(key, fallback = null) {
-    try {
-      const v = localStorage.getItem(key);
-      if (v === null || v === undefined || v === "") return fallback;
-      return JSON.parse(v);
-    } catch {
-      return fallback;
-    }
-  },
-  set(key, value) {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch { }
-  },
-  getStr(key, fallback = "") {
-    try {
-      const v = localStorage.getItem(key);
-      return v === null || v === undefined ? fallback : String(v);
-    } catch {
-      return fallback;
-    }
-  },
-  setStr(key, value) {
-    try {
-      localStorage.setItem(key, String(value ?? ""));
-    } catch { }
-  },
-  del(key) {
-    try { localStorage.removeItem(key); } catch { }
-  },
+// --- persistent local config
+const LS = {
+  get(k, d=null){ try{ const v = localStorage.getItem(k); return v==null? d : JSON.parse(v);}catch{return d;} },
+  set(k, v){ localStorage.setItem(k, JSON.stringify(v)); },
+  del(k){ localStorage.removeItem(k); }
 };
 
-// ---------- API ----------
+// --- API
 const API = {
-  base: store.getStr("apibase", "/api/v1"),
-  token: store.getStr("token", ""),
-  setBase(url) {
-    this.base = (url || "/api/v1").trim().replace(/\/+$/, "");
-    store.setStr("apibase", this.base);
-  },
-  setToken(t) {
-    this.token = t || "";
-    store.setStr("token", this.token);
-  },
-  async req(path, { method = "GET", body = null, headers = {}, timeoutMs = 30000 } = {}) {
-    const h = { "Content-Type": "application/json", ...headers };
+  base: LS.get("apiBase", "/api/v1"),
+  token: localStorage.getItem("token") || "",
+  setBase(b){ this.base = (b||"/api/v1").trim().replace(/\/$/,""); LS.set("apiBase", this.base); },
+  setToken(t){ this.token = t||""; localStorage.setItem("token", this.token); },
+  async req(path, { method="GET", body=null, headers={}, timeoutMs=30000 } = {}){
+    const h = { ...headers };
+    if (!(body instanceof FormData)) h["Content-Type"] = "application/json";
     if (this.token) h.Authorization = `Bearer ${this.token}`;
 
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    let res;
-    try {
-      res = await fetch(this.base + path, {
+    const to = setTimeout(()=>ctrl.abort(), timeoutMs);
+    try{
+      const res = await fetch(this.base + path, {
         method,
         headers: h,
-        body: body ? JSON.stringify(body) : null,
-        signal: ctrl.signal,
+        body: body ? (body instanceof FormData ? body : JSON.stringify(body)) : null,
+        signal: ctrl.signal
       });
+      const txt = await res.text();
+      let data = null;
+      try{ data = txt ? JSON.parse(txt) : null; } catch { data = { raw: txt }; }
+      if(!res.ok) throw new Error(data?.detail || data?.error || txt || `HTTP ${res.status}`);
+      return data;
     } finally {
-      clearTimeout(t);
+      clearTimeout(to);
     }
-
-    const txt = await res.text();
-    let data = null;
-    try { data = txt ? JSON.parse(txt) : null; } catch { data = { raw: txt }; }
-
-    if (res.status === 401) {
-      // Token invalid/expired
-      if (API.token) {
-        API.setToken("");
-        state.me = null;
-      }
-    }
-
-    if (!res.ok) throw new Error(data?.detail || data?.error || txt || `HTTP ${res.status}`);
-    return data;
-  },
+  }
 };
 
-// ---------- App state ----------
+// --- app state
 const state = {
   me: null,
-  page: store.getStr("page", "chat"),
-  chat: store.get("chat_history", []),
-  chatDraft: store.getStr("chat_draft", ""),
+  page: LS.get("page", "chat"),
+  chat: LS.get("chat", []),
+  chatDraft: LS.get("chatDraft", ""),
+  attachments: [], // current message attachments
   providers: [],
   models: {},
-  notifications: [],
-  reminders: [],
-  events: [],
-  guestProjects: store.get("guest_projects", []),
-  ui: {
-    theme: store.getStr("theme", "auto"), // auto | light | dark
-    reduceMotion: !!store.get("reduce_motion", false),
-  },
-  chatSettings: store.get("chat_settings", {
-    system: "",
-    temperature: 0.7,
-    max_tokens: 2048,
-    json_mode: false,
-    markdown: true,
-    typewriter: true,
-    auto_scroll: true,
+  localProjects: LS.get("localProjects", []),
+  localSettings: LS.get("localSettings", {
+    theme: "auto",
+    reduceMotion: false,
+    fontSize: 15,
+    haptics: true,
+    chatAutoscroll: true,
+    chatMarkdown: true,
+    chatTypewriter: false,
+    chatCompact: false,
+    chatSound: false,
+    maxAttachmentMB: 10,
   }),
+  media: {
+    image: { file: null, url: "", filter: { brightness: 100, contrast: 100, saturate: 100 }, rotate: 0 },
+    video: { file: null, url: "", start: 0, end: 0 }
+  }
 };
 
-// ---------- UX helpers ----------
-function haptic(type = "impact", style = "light") {
-  if (!tg) return;
-  const s = state.me?.settings || {};
+function isAuthed(){ return !!API.token; }
+function isAdmin(){ return !!state.me?.is_admin; }
+
+function saveLocal(){
+  LS.set("page", state.page);
+  LS.set("chat", state.chat);
+  LS.set("chatDraft", state.chatDraft);
+  LS.set("localProjects", state.localProjects);
+  LS.set("localSettings", state.localSettings);
+}
+
+// --- UI feedback
+function haptic(type="impact", style="light"){
+  if(!tg) return;
+  const s = currentSettings();
   if (s.haptics === false) return;
-  try {
-    if (type === "impact") tg.HapticFeedback.impactOccurred(style);
-    if (type === "notify") tg.HapticFeedback.notificationOccurred(style);
-    if (type === "select") tg.HapticFeedback.selectionChanged();
-  } catch { }
+  try{
+    if(type==="impact") tg.HapticFeedback.impactOccurred(style);
+    if(type==="notify") tg.HapticFeedback.notificationOccurred(style);
+    if(type==="select") tg.HapticFeedback.selectionChanged();
+  }catch{}
+}
+function toast(msg, ok=true){
+  if(tg?.showPopup) tg.showPopup({ title: ok?"Готово":"Ошибка", message: String(msg), buttons:[{type:"ok"}] });
+  else alert((ok?"OK: ":"ERR: ") + msg);
 }
 
-function popup(title, message) {
-  if (tg?.showPopup) tg.showPopup({ title, message: String(message), buttons: [{ type: "ok" }] });
-  else alert(`${title}: ${message}`);
+// --- theme
+function applyTheme(){
+  const s = currentSettings();
+  const mode = s.theme || "auto";
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const dark = mode==="dark" || (mode==="auto" && prefersDark);
+  document.documentElement.classList.toggle("theme-dark", dark);
+  document.documentElement.style.setProperty("--fs", String(clamp(Number(s.fontSize)||15, 12, 20)) + "px");
+  document.documentElement.classList.toggle("reduce-motion", !!s.reduceMotion);
 }
 
-function toast(msg, ok = true) {
-  popup(ok ? "Готово" : "Ошибка", msg);
+function currentSettings(){
+  const remote = state.me?.settings || {};
+  return { ...state.localSettings, ...remote };
 }
 
-function fmtTime(ts) {
-  try {
-    const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return String(ts);
-    return d.toLocaleString();
-  } catch {
-    return String(ts);
-  }
-}
-
-function debounce(fn, ms = 250) {
-  let t;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), ms);
-  };
-}
-
-// Minimal markdown renderer (safe-ish): code blocks + inline code + newlines.
-function renderMarkdownToHTML(text) {
-  const safe = esc(text);
-  // code fences ```
-  const fenced = safe.replace(/```([\s\S]*?)```/g, (m, p1) => {
-    return `<pre class="code"><code>${p1}</code></pre>`;
-  });
-  const inline = fenced.replace(/`([^`]+)`/g, (m, p1) => `<code class="icode">${p1}</code>`);
-  const withBreaks = inline.replace(/\n/g, "<br/>");
-  return withBreaks;
-}
-
-// ---------- Telegram integration ----------
+// --- Telegram
 let tgBackBound = false;
-function bindTelegramBackOnce() {
-  if (!tg || tgBackBound) return;
-  tgBackBound = true;
-  try {
-    tg.BackButton.onClick(() => {
-      // simple navigation stack: back to chat, otherwise close
-      if (state.page !== "chat") setPage("chat");
-      else tg.close();
+async function telegramAutoLogin(){
+  if(!tg) return;
+  try{ tg.ready(); tg.expand(); }catch{}
+
+  if(!tgBackBound){
+    tgBackBound = true;
+    tg.BackButton.onClick(()=>{
+      if(state.page !== "chat") setPage("chat");
+      else { try{ tg.close(); }catch{} }
     });
-  } catch { }
-}
-
-function updateTelegramBackButton() {
-  if (!tg) return;
-  try {
-    if (state.page !== "chat") tg.BackButton.show();
-    else tg.BackButton.hide();
-  } catch { }
-}
-
-function applyTheme() {
-  const mode = state.ui.theme;
-  const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-  const tgScheme = tg?.colorScheme;
-
-  let finalMode = mode;
-  if (mode === "auto") {
-    finalMode = tgScheme || (prefersDark ? "dark" : "light");
   }
 
-  document.documentElement.dataset.theme = finalMode;
-  store.setStr("theme", mode);
-}
-
-async function telegramAutoLogin() {
-  if (!tg) return;
-  try {
-    tg.ready();
-    tg.expand();
-  } catch { }
-
-  bindTelegramBackOnce();
-  applyTheme();
-
-  if (API.token) return;
-  try {
-    if (!tg.initData) return;
-    const tok = await API.req("/auth/telegram", { method: "POST", body: { init_data: tg.initData } });
+  if(API.token) return;
+  try{
+    if(!tg.initData) return;
+    const tok = await API.req("/auth/telegram", { method:"POST", body:{ init_data: tg.initData } });
     API.setToken(tok.access_token);
-    haptic("notify", "success");
-  } catch (e) {
+    haptic("notify","success");
+  }catch(e){
     console.warn("TG login failed:", e.message);
   }
 }
 
-// ---------- Navigation ----------
-function setPage(p) {
+// --- navigation
+function setPage(p){
   state.page = p;
-  store.setStr("page", p);
+  saveLocal();
   haptic("select");
   render();
 }
+function openDrawer(){ $(".backdrop")?.classList.add("show"); $(".sidebar.drawer")?.classList.add("open"); }
+function closeDrawer(){ $(".backdrop")?.classList.remove("show"); $(".sidebar.drawer")?.classList.remove("open"); }
 
-function openDrawer() {
-  $(".backdrop")?.classList.add("show");
-  $(".sidebar.drawer")?.classList.add("open");
-}
-
-function closeDrawer() {
-  $(".backdrop")?.classList.remove("show");
-  $(".sidebar.drawer")?.classList.remove("open");
-}
-
-function titleOf(p) {
-  return (
-    {
-      chat: "Чат",
-      projects: "Проекты",
-      keys: "Ключи",
-      reminders: "Напоминания",
-      calendar: "Календарь",
-      notifications: "Уведомления",
-      settings: "Настройки",
-      diagnostics: "Диагностика",
-      shortcuts: "Горячие клавиши",
-      admin: "Админ",
-      login: "Вход",
-    }[p] || "AI Platform"
-  );
-}
-
-function navItems() {
+function navItems(){
   const items = [
-    ["chat", "Чат", "⌘1"],
-    ["projects", "Проекты", "⌘2"],
-    ["keys", "Ключи", "⌘3"],
-    ["reminders", "Напоминания", "⌘4"],
-    ["calendar", "Календарь", "⌘5"],
-    ["notifications", "Уведомления", "⌘6"],
-    ["settings", "Настройки", "⌘7"],
-    ["diagnostics", "Диагностика", "⌘8"],
-    ["shortcuts", "Клавиши", "?"],
+    ["chat","Чат","⌘1"],
+    ["projects","Проекты","⌘2"],
+    ["media","Медиа","⌘3"],
+    ["keys","Ключи","⌘4"],
+    ["reminders","Напоминания","⌘5"],
+    ["calendar","Календарь","⌘6"],
+    ["notifications","Уведомления","⌘7"],
+    ["settings","Настройки","⌘8"],
   ];
-  if (state.me?.is_admin) items.push(["admin", "Админ", "⌘9"]);
+  if(isAdmin()) items.push(["admin","Админ","⌘9"]);
   return items;
 }
+function titleOf(p){
+  return ({
+    chat:"Чат", projects:"Проекты", media:"Медиа", keys:"Ключи", reminders:"Напоминания",
+    calendar:"Календарь", notifications:"Уведомления", settings:"Настройки",
+    admin:"Админ", login:"Вход"
+  })[p] || "AI Platform";
+}
 
-function sidebar(isDrawer) {
+function sidebar(isDrawer){
   const sb = el("div", isDrawer ? "sidebar drawer" : "sidebar");
-  const head = el("div", "card");
-  head.innerHTML = `<div class="h2">AI Platform</div><div class="muted small">TG Mini App + Web</div>`;
+  const head = el("div","card");
+  head.innerHTML = `
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div>
+        <div class="h2">AI Platform</div>
+        <div class="muted small">frontend</div>
+      </div>
+      <button class="iconbtn" id="sbClose" title="Закрыть">✕</button>
+    </div>
+  `;
   sb.appendChild(head);
 
-  const nav = el("div", "");
-  navItems().forEach(([id, label, k]) => {
-    const b = el("button", "navbtn" + (state.page === id ? " active" : ""));
+  const nav = el("div","");
+  navItems().forEach(([id,label,k])=>{
+    const b = el("button","navbtn" + (state.page===id?" active":""));
     b.innerHTML = `<span>${label}</span><span class="k">${k}</span>`;
-    b.onclick = () => {
-      setPage(id);
-      if (isDrawer) closeDrawer();
-    };
+    b.onclick = ()=>{ setPage(id); if(isDrawer) closeDrawer(); };
     nav.appendChild(b);
   });
   sb.appendChild(nav);
 
-  const quick = el("div", "card");
+  const quick = el("div","card");
   quick.innerHTML = `
-    <div class="h2">Быстро</div>
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div class="h2">Быстро</div>
+      <span class="muted small">${isAuthed()? (esc(state.me?.email||"")) : "гость"}</span>
+    </div>
     <div class="hr"></div>
     <div class="row">
       <button class="btn primary" id="qNew">Новый чат</button>
-      <button class="btn" id="qReload">Обновить</button>
+      <button class="btn" id="qClear">Очистить</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn" id="qDiag">Диагностика</button>
+      <button class="btn" id="qPing">Ping API</button>
     </div>
   `;
   sb.appendChild(quick);
 
-  setTimeout(() => {
-    $("#qNew", sb)?.addEventListener("click", () => {
-      state.chat = [];
-      store.set("chat_history", state.chat);
-      setPage("chat");
-      if (isDrawer) closeDrawer();
-    });
-    $("#qReload", sb)?.addEventListener("click", () => {
-      boot();
-      if (isDrawer) closeDrawer();
-    });
-  }, 0);
+  setTimeout(()=>{
+    $("#sbClose", sb)?.addEventListener("click", ()=>{ if(isDrawer) closeDrawer(); });
+    $("#qNew", sb)?.addEventListener("click", ()=>{ state.chat=[]; state.chatDraft=""; saveLocal(); setPage("chat"); if(isDrawer) closeDrawer(); });
+    $("#qClear", sb)?.addEventListener("click", ()=>{ if(confirm("Очистить локальные данные?")) resetLocalData(); if(isDrawer) closeDrawer(); });
+    $("#qDiag", sb)?.addEventListener("click", ()=>{ showDiagnostics(); if(isDrawer) closeDrawer(); });
+    $("#qPing", sb)?.addEventListener("click", async()=>{ await pingApi(); if(isDrawer) closeDrawer(); });
+  },0);
 
   return sb;
 }
 
-function bottomNav() {
-  const bn = el("div", "bottom-nav");
-  const short = [
-    ["chat", "Чат"],
-    ["projects", "Проекты"],
-    ["settings", "Настройки"],
-    ["diagnostics", "Диагн."],
-  ];
-  const items = state.me?.is_admin ? short.concat([["admin", "Админ"]]) : short;
-  items.forEach(([id, label]) => {
-    const b = el("button", state.page === id ? "active" : "");
+function bottomNav(){
+  const bn = el("div","bottom-nav");
+  const short = [["chat","Чат"],["projects","Проекты"],["media","Медиа"],["settings","Настройки"]];
+  short.forEach(([id,label])=>{
+    const b = el("button", state.page===id?"active":"");
     b.textContent = label;
-    b.onclick = () => setPage(id);
+    b.onclick = ()=> setPage(id);
     bn.appendChild(b);
   });
   return bn;
 }
 
-function topbar() {
-  const t = el("div", "topbar");
-  const left = el("div", "row");
-  const burger = el("button", "btn");
+function topbar(){
+  const t = el("div","topbar");
+  const left = el("div","row");
+  const burger = el("button","iconbtn");
   burger.textContent = "☰";
-  burger.onclick = () => openDrawer();
+  burger.title = "Меню";
+  burger.onclick = ()=> openDrawer();
   left.appendChild(burger);
-  const h = el("div", "h1");
-  h.textContent = titleOf(state.page);
+  const h = el("div","h1"); h.textContent = titleOf(state.page);
   left.appendChild(h);
 
-  const right = el("div", "row");
-  const role = el("span", "pill");
-  role.textContent = state.me?.is_admin ? "ADMIN" : state.me ? "USER" : "GUEST";
+  const right = el("div","row");
+  const role = el("button","pillbtn");
+  role.textContent = isAdmin()?"ADMIN":(isAuthed()?"USER":"GUEST");
+  role.title = "Меню профиля";
+  role.onclick = ()=> openUserMenu(role);
   right.appendChild(role);
 
-  const authBtn = el("button", "btn");
-  authBtn.textContent = API.token ? "Выйти" : "Войти";
-  authBtn.onclick = () => (API.token ? logout() : setPage("login"));
+  const authBtn = el("button","btn");
+  authBtn.textContent = isAuthed()?"Выйти":"Войти";
+  authBtn.onclick = ()=> isAuthed()? logout() : setPage("login");
   right.appendChild(authBtn);
 
-  t.appendChild(left);
-  t.appendChild(right);
+  t.appendChild(left); t.appendChild(right);
   return t;
 }
 
-function requireLoginCard(featureName = "Эта функция") {
-  const w = el("div", "card");
-  w.innerHTML = `
-    <div class="h2">Нужен вход</div>
-    <div class="muted small">${esc(featureName)} доступна только после входа.</div>
-    <div class="hr"></div>
-    <div class="row">
-      <button class="btn primary" id="goLogin">Войти</button>
-      <button class="btn" id="goChat">В чат</button>
-    </div>
-  `;
-  setTimeout(() => {
-    $("#goLogin", w).onclick = () => setPage("login");
-    $("#goChat", w).onclick = () => setPage("chat");
-  }, 0);
-  return w;
-}
-
-function view() {
-  // Public pages always allowed
-  const publicPages = new Set(["chat", "projects", "settings", "diagnostics", "shortcuts", "login"]);
-  if (!API.token && !publicPages.has(state.page)) return requireLoginCard(titleOf(state.page));
-
-  if (state.page === "login") return loginView();
-  if (state.page === "chat") return chatView();
-  if (state.page === "projects") return projectsView();
-  if (state.page === "keys") return keysView();
-  if (state.page === "reminders") return remindersView();
-  if (state.page === "calendar") return calendarView();
-  if (state.page === "notifications") return notificationsView();
-  if (state.page === "settings") return settingsView();
-  if (state.page === "diagnostics") return diagnosticsView();
-  if (state.page === "shortcuts") return shortcutsView();
-  if (state.page === "admin") return adminView();
-  return el("div", "card");
-}
-
-function render() {
+function render(){
+  applyTheme();
   const root = $("#app");
   root.innerHTML = "";
 
-  const backdrop = el("div", "backdrop");
+  const backdrop = el("div","backdrop");
   backdrop.onclick = closeDrawer;
   root.appendChild(backdrop);
 
   root.appendChild(sidebar(true));
 
-  const shell = el("div", "shell");
+  const shell = el("div","shell");
   shell.appendChild(sidebar(false));
-
-  const main = el("div", "main");
+  const main = el("div","main");
   main.appendChild(topbar());
   main.appendChild(view());
   shell.appendChild(main);
-
   root.appendChild(shell);
   root.appendChild(bottomNav());
 
-  updateTelegramBackButton();
+  if(tg){
+    try{ (state.page!=="chat") ? tg.BackButton.show() : tg.BackButton.hide(); }catch{}
+  }
 }
 
-// ---------- Auth ----------
-function loginView() {
-  const w = el("div", "card");
+function gate(label){
+  const w = el("div","card");
   w.innerHTML = `
-    <div class="h1">Вход</div>
-    <div class="muted small">В Telegram обычно вход автоматический (initData). Если нет — войди по email.</div>
+    <div class="h2">Нужен вход</div>
+    <div class="muted">${esc(label)}</div>
     <div class="hr"></div>
-    <label class="small muted">Email</label>
-    <input class="input" id="email" placeholder="you@mail.com" autocomplete="username"/>
-    <div style="height:8px"></div>
-    <label class="small muted">Пароль</label>
-    <input class="input" id="pass" type="password" placeholder="••••••••" autocomplete="current-password"/>
-    <div class="hr"></div>
-    <div class="row">
-      <button class="btn primary" id="btnLogin">Войти</button>
-      <button class="btn" id="btnReg">Регистрация</button>
-      <button class="btn" id="btnGuest">Продолжить как гость</button>
-    </div>
-    <div class="muted small" style="margin-top:10px">Админ создаётся автоматически из ADMIN_EMAIL/ADMIN_PASSWORD (бэкенд)</div>
+    <button class="btn primary" id="go">Войти</button>
   `;
-
-  setTimeout(() => {
-    $("#btnGuest", w).onclick = () => setPage("chat");
-
-    $("#btnLogin", w).onclick = async () => {
-      try {
-        const email = $("#email", w).value.trim();
-        const password = $("#pass", w).value;
-        const tok = await API.req("/auth/login_json", { method: "POST", body: { email, password } });
-        API.setToken(tok.access_token);
-        await boot();
-        setPage("chat");
-      } catch (e) {
-        toast(e.message, false);
-      }
-    };
-
-    $("#btnReg", w).onclick = async () => {
-      try {
-        const email = $("#email", w).value.trim();
-        const password = $("#pass", w).value;
-        const tok = await API.req("/auth/register", { method: "POST", body: { email, password, full_name: "" } });
-        API.setToken(tok.access_token);
-        await boot();
-        setPage("chat");
-      } catch (e) {
-        toast(e.message, false);
-      }
-    };
-  }, 0);
-
+  setTimeout(()=>{ $("#go",w).onclick = ()=> setPage("login"); },0);
   return w;
 }
 
-function logout() {
-  API.setToken("");
-  state.me = null;
-  // keep local chat/projects for guest
-  setPage("chat");
-  toast("Вы вышли. Гостевой режим активен.");
+function view(){
+  const guestOk = new Set(["chat","projects","media","settings","login"]);
+  if(!isAuthed() && !guestOk.has(state.page)) return gate("Этот раздел доступен только пользователю.");
+
+  if(state.page==="login") return loginView();
+  if(state.page==="chat") return chatView();
+  if(state.page==="projects") return projectsView();
+  if(state.page==="media") return mediaView();
+  if(state.page==="keys") return keysView();
+  if(state.page==="reminders") return remindersView();
+  if(state.page==="calendar") return calendarView();
+  if(state.page==="notifications") return notificationsView();
+  if(state.page==="settings") return settingsView();
+  if(state.page==="admin") return adminView();
+  return el("div","card");
 }
 
-// ---------- Chat ----------
-function chatView() {
-  const w = el("div", "card");
-  const provOpts = (state.providers || []).map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+// --- user menu (GUEST pill)
+function openUserMenu(anchorEl){
+  const existing = $(".pop");
+  if(existing) existing.remove();
 
-  w.innerHTML = `
-    <div class="row" style="justify-content:space-between">
-      <div class="h2">AI чат</div>
-      <div class="row" style="gap:8px">
-        <span class="pill">${navigator.onLine ? "online" : "offline"}</span>
-        <span class="pill">${API.token ? "API" : "DEMO"}</span>
+  const pop = el("div","pop");
+  const s = currentSettings();
+  pop.innerHTML = `
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div>
+        <div class="h2">${isAuthed()? esc(state.me?.email||"Пользователь") : "Гостевой режим"}</div>
+        <div class="muted small">API: ${esc(API.base)}</div>
       </div>
+      <button class="iconbtn" id="x">✕</button>
     </div>
-
     <div class="hr"></div>
-
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <select id="provider" class="input" style="max-width:230px">
-        <option value="auto">auto</option>${provOpts}
-      </select>
-      <select id="model" class="input" style="max-width:260px">
-        <option value="">model (auto)</option>
-      </select>
-      <input id="search" class="input" placeholder="Поиск по чату" style="max-width:260px"/>
-    </div>
-
-    <details id="adv" style="margin-top:10px">
-      <summary class="muted small">Настройки запроса</summary>
-      <div style="height:10px"></div>
-      <label class="small muted">System prompt</label>
-      <textarea id="system" class="input" rows="2" placeholder="Например: отвечай кратко..."></textarea>
-      <div style="height:8px"></div>
-      <div class="row" style="flex-wrap:wrap; gap:8px">
-        <div style="min-width:190px">
-          <label class="small muted">Temperature: <span id="tval"></span></label>
-          <input id="temp" class="input" type="range" min="0" max="1" step="0.05" />
-        </div>
-        <div style="min-width:190px">
-          <label class="small muted">Max tokens</label>
-          <input id="maxt" class="input" type="number" min="16" max="8192" step="16" />
-        </div>
-        <div style="min-width:190px">
-          <label class="small muted">Опции</label>
-          <div class="row" style="gap:10px; flex-wrap:wrap">
-            <label class="row small"><input type="checkbox" id="json"/> JSON</label>
-            <label class="row small"><input type="checkbox" id="md"/> Markdown</label>
-            <label class="row small"><input type="checkbox" id="tw"/> Typewriter</label>
-            <label class="row small"><input type="checkbox" id="as"/> Auto-scroll</label>
-          </div>
-        </div>
-      </div>
-    </details>
-
-    <div style="height:10px"></div>
-
-    <div class="chatlog" id="chatlog"></div>
-
-    <div class="hr"></div>
-
-    <textarea id="prompt" class="input" rows="3" placeholder="Напиши запрос..."></textarea>
-
-    <div style="height:10px"></div>
-
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <button class="btn primary" id="send">Отправить</button>
-      <button class="btn" id="clear">Очистить</button>
+    <div class="row" style="flex-wrap:wrap">
+      <button class="btn" id="goSettings">Настройки</button>
       <button class="btn" id="export">Экспорт</button>
       <button class="btn" id="import">Импорт</button>
-      <button class="btn" id="copyLast">Копировать ответ</button>
-      <button class="btn" id="editLast">Изменить последний запрос</button>
+      <button class="btn" id="reset">Сброс</button>
     </div>
-
-    <div class="muted small" style="margin-top:8px">Ctrl/⌘+Enter — отправить • / — поиск • ? — подсказка</div>
+    <div class="hr"></div>
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div class="muted small">Тема</div>
+      <select id="theme" class="input" style="width:140px">
+        <option value="auto">auto</option>
+        <option value="light">light</option>
+        <option value="dark">dark</option>
+      </select>
+    </div>
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div class="muted small">Размер шрифта</div>
+      <input id="fs" type="range" min="12" max="20" value="${esc(s.fontSize)}" />
+    </div>
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div class="muted small">Reduce motion</div>
+      <input id="rm" type="checkbox" ${s.reduceMotion?"checked":""} />
+    </div>
   `;
+  document.body.appendChild(pop);
 
-  setTimeout(() => {
-    const chatlog = $("#chatlog", w);
-    const provider = $("#provider", w);
-    const model = $("#model", w);
-    const prompt = $("#prompt", w);
-    const search = $("#search", w);
+  const r = anchorEl.getBoundingClientRect();
+  pop.style.top = (r.bottom + 8) + "px";
+  pop.style.right = "12px";
 
-    const system = $("#system", w);
-    const temp = $("#temp", w);
-    const tval = $("#tval", w);
-    const maxt = $("#maxt", w);
-    const json = $("#json", w);
-    const md = $("#md", w);
-    const tw = $("#tw", w);
-    const as = $("#as", w);
+  const close = ()=> pop.remove();
+  $("#x",pop).onclick = close;
+  $("#goSettings",pop).onclick = ()=>{ close(); setPage("settings"); };
+  $("#export",pop).onclick = ()=>{ exportAll(); close(); };
+  $("#import",pop).onclick = ()=>{ importAll(); close(); };
+  $("#reset",pop).onclick = ()=>{ if(confirm("Сбросить локальные данные?")) resetLocalData(); close(); };
 
-    // init settings
-    system.value = state.chatSettings.system || "";
-    temp.value = String(state.chatSettings.temperature ?? 0.7);
-    tval.textContent = String(state.chatSettings.temperature ?? 0.7);
-    maxt.value = String(state.chatSettings.max_tokens ?? 2048);
-    json.checked = !!state.chatSettings.json_mode;
-    md.checked = state.chatSettings.markdown !== false;
-    tw.checked = state.chatSettings.typewriter !== false;
-    as.checked = state.chatSettings.auto_scroll !== false;
+  $("#theme",pop).value = s.theme || "auto";
+  $("#theme",pop).onchange = ()=>{ state.localSettings.theme = $("#theme",pop).value; saveLocal(); applyTheme(); };
+  $("#fs",pop).oninput = ()=>{ state.localSettings.fontSize = Number($("#fs",pop).value); saveLocal(); applyTheme(); };
+  $("#rm",pop).onchange = ()=>{ state.localSettings.reduceMotion = $("#rm",pop).checked; saveLocal(); applyTheme(); };
 
-    prompt.value = state.chatDraft || "";
+  setTimeout(()=>{
+    const off = (ev)=>{ if(!pop.contains(ev.target) && ev.target!==anchorEl){ document.removeEventListener("mousedown", off); close(); } };
+    document.addEventListener("mousedown", off);
+  },0);
+}
 
-    function persistChatSettings() {
-      state.chatSettings = {
-        system: system.value,
-        temperature: Number(temp.value),
-        max_tokens: Math.max(16, Number(maxt.value) || 2048),
-        json_mode: !!json.checked,
-        markdown: !!md.checked,
-        typewriter: !!tw.checked,
-        auto_scroll: !!as.checked,
-      };
-      store.set("chat_settings", state.chatSettings);
-    }
-
-    const saveDraft = debounce(() => {
-      state.chatDraft = prompt.value || "";
-      store.setStr("chat_draft", state.chatDraft);
-    }, 200);
-
-    function fillModels() {
-      const p = provider.value;
-      const arr = p === "auto" ? [] : state.models[p] || [];
-      model.innerHTML = `<option value="">model (auto)</option>` + arr.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join("");
-    }
-
-    function renderChat() {
-      const q = (search.value || "").trim().toLowerCase();
-      chatlog.innerHTML = "";
-
-      state.chat.forEach((m, idx) => {
-        const b = el("div", "msg " + (m.role === "user" ? "user" : "ai"));
-        b.dataset.idx = String(idx);
-
-        if (m.role !== "user") {
-          // AI message
-          if (state.chatSettings.markdown) {
-            b.innerHTML = renderMarkdownToHTML(m.text);
-          } else {
-            b.textContent = m.text;
-          }
-        } else {
-          b.textContent = m.text;
-        }
-
-        if (q && (m.text || "").toLowerCase().includes(q)) {
-          b.classList.add("hit");
-        }
-
-        // context menu: delete message
-        b.oncontextmenu = (ev) => {
-          ev.preventDefault();
-          const ok = confirm("Удалить это сообщение?");
-          if (!ok) return;
-          state.chat.splice(idx, 1);
-          store.set("chat_history", state.chat);
-          renderChat();
-        };
-
-        chatlog.appendChild(b);
-      });
-
-      if (state.chatSettings.auto_scroll) chatlog.scrollTop = chatlog.scrollHeight;
-    }
-
-    function typewriterAppend(text, onDone) {
-      const b = el("div", "msg ai");
-      chatlog.appendChild(b);
-      let i = 0;
-      const step = () => {
-        i += Math.max(1, Math.floor(text.length / 120));
-        const slice = text.slice(0, i);
-        if (state.chatSettings.markdown) b.innerHTML = renderMarkdownToHTML(slice);
-        else b.textContent = slice;
-        if (state.chatSettings.auto_scroll) chatlog.scrollTop = chatlog.scrollHeight;
-        if (i < text.length) {
-          if (!state.ui.reduceMotion && state.chatSettings.typewriter) requestAnimationFrame(step);
-          else {
-            // if reduced motion, jump
-            i = text.length;
-            step();
-          }
-        } else {
-          onDone?.();
-        }
-      };
-      step();
-    }
-
-    provider.onchange = () => { fillModels(); haptic("select"); };
-    fillModels();
-
-    // Search highlighting
-    search.addEventListener("input", renderChat);
-
-    // Chat settings events
-    const onSetting = () => { tval.textContent = temp.value; persistChatSettings(); };
-    [system, temp, maxt, json, md, tw, as].forEach((n) => n.addEventListener("input", onSetting));
-
-    // Draft persistence
-    prompt.addEventListener("input", saveDraft);
-
-    renderChat();
-
-    async function send() {
-      const text = (prompt.value || "").trim();
-      if (!text) return;
-
-      state.chat.push({ role: "user", text, ts: Date.now() });
-      store.set("chat_history", state.chat);
-      prompt.value = "";
-      saveDraft();
-      renderChat();
-      haptic("impact", "light");
-
-      // Guest/demo mode
-      if (!API.token) {
-        const reply = demoAnswer(text);
-        if (state.chatSettings.typewriter && !state.ui.reduceMotion) {
-          typewriterAppend(reply, () => {
-            state.chat.push({ role: "ai", text: reply, ts: Date.now() });
-            store.set("chat_history", state.chat);
-            renderChat();
-          });
-        } else {
-          state.chat.push({ role: "ai", text: reply, ts: Date.now() });
-          store.set("chat_history", state.chat);
-          renderChat();
-        }
-        return;
-      }
-
-      try {
-        const resp = await API.req("/ai/generate", {
-          method: "POST",
-          body: {
-            prompt: text,
-            system_prompt: state.chatSettings.system || null,
-            provider: provider.value === "auto" ? null : provider.value,
-            model: model.value || null,
-            temperature: Number(state.chatSettings.temperature ?? 0.7),
-            max_tokens: Number(state.chatSettings.max_tokens ?? 2048),
-            json_mode: !!state.chatSettings.json_mode,
-          },
-        });
-
-        const answer = resp?.response ?? "";
-
-        if (state.chatSettings.typewriter && !state.ui.reduceMotion) {
-          typewriterAppend(answer, () => {
-            state.chat.push({ role: "ai", text: answer, ts: Date.now() });
-            store.set("chat_history", state.chat);
-            renderChat();
-            haptic("notify", "success");
-          });
-        } else {
-          state.chat.push({ role: "ai", text: answer, ts: Date.now() });
-          store.set("chat_history", state.chat);
-          renderChat();
-          haptic("notify", "success");
-        }
-      } catch (e) {
-        const err = "Ошибка: " + e.message;
-        state.chat.push({ role: "ai", text: err, ts: Date.now() });
-        store.set("chat_history", state.chat);
-        renderChat();
-        haptic("notify", "error");
-      }
-    }
-
-    $("#send", w).onclick = send;
-
-    $("#clear", w).onclick = () => {
-      if (!confirm("Очистить чат?")) return;
-      state.chat = [];
-      store.set("chat_history", state.chat);
-      renderChat();
-      haptic("select");
+// --- auth
+function loginView(){
+  const w = el("div","card");
+  w.innerHTML = `
+    <div class="h2">Вход</div>
+    <div class="muted">Telegram: обычно авто. Web: email+password.</div>
+    <div class="hr"></div>
+    <input id="email" class="input" placeholder="email" />
+    <input id="pass" class="input" type="password" placeholder="password" style="margin-top:8px" />
+    <div class="row" style="margin-top:10px">
+      <button id="login" class="btn primary">Войти</button>
+      <button id="guest" class="btn">Продолжить как гость</button>
+    </div>
+    <div class="hr"></div>
+    <div class="muted small">API base можно поменять в Настройках → Сеть.</div>
+  `;
+  setTimeout(()=>{
+    $("#guest",w).onclick = ()=> setPage("chat");
+    $("#login",w).onclick = async ()=>{
+      try{
+        const email = $("#email",w).value.trim();
+        const password = $("#pass",w).value;
+        const tok = await API.req("/auth/login", { method:"POST", body:{ email, password } });
+        API.setToken(tok.access_token);
+        await boot();
+        setPage("chat");
+      }catch(e){ toast(e.message,false); }
     };
-
-    $("#copyLast", w).onclick = async () => {
-      const last = [...state.chat].reverse().find((m) => m.role === "ai");
-      if (!last) return toast("Нет ответа для копирования", false);
-      try {
-        await navigator.clipboard.writeText(last.text);
-        toast("Скопировано");
-      } catch {
-        // fallback
-        const ta = el("textarea");
-        ta.value = last.text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        ta.remove();
-        toast("Скопировано");
-      }
-    };
-
-    $("#editLast", w).onclick = () => {
-      const lastUserIdx = (() => {
-        for (let i = state.chat.length - 1; i >= 0; i--) if (state.chat[i].role === "user") return i;
-        return -1;
-      })();
-      if (lastUserIdx < 0) return toast("Нет последнего запроса", false);
-      prompt.value = state.chat[lastUserIdx].text;
-      prompt.focus();
-      toast("Можно отредактировать и отправить");
-    };
-
-    // Export chat history
-    $("#export", w).onclick = () => {
-      const payload = {
-        exported_at: new Date().toISOString(),
-        settings: state.chatSettings,
-        chat: state.chat,
-      };
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-      const a = el("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `chat_${Date.now()}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    };
-
-    // Import chat history
-    $("#import", w).onclick = () => {
-      const inp = el("input");
-      inp.type = "file";
-      inp.accept = "application/json";
-      inp.onchange = async () => {
-        const f = inp.files?.[0];
-        if (!f) return;
-        try {
-          const txt = await f.text();
-          const data = JSON.parse(txt);
-          if (!Array.isArray(data.chat)) throw new Error("Неверный формат: нет chat[]");
-          state.chat = data.chat;
-          store.set("chat_history", state.chat);
-          if (data.settings) {
-            state.chatSettings = { ...state.chatSettings, ...data.settings };
-            store.set("chat_settings", state.chatSettings);
-          }
-          render();
-          toast("Импортировано");
-        } catch (e) {
-          toast(e.message, false);
-        }
-      };
-      inp.click();
-    };
-
-    prompt.addEventListener("keydown", (ev) => {
-      if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
-        ev.preventDefault();
-        send();
-      }
-      if (!ev.ctrlKey && !ev.metaKey && ev.key === "/") {
-        // focus search when user types '/'
-        // do not steal if textarea has content selection; keep simple
-      }
-    });
-
-    // Keyboard shortcuts inside chat
-    window.addEventListener(
-      "keydown",
-      (ev) => {
-        if (state.page !== "chat") return;
-        if (ev.key === "/" && document.activeElement !== prompt) {
-          ev.preventDefault();
-          search.focus();
-        }
-      },
-      { passive: false }
-    );
-
-  }, 0);
-
+  },0);
   return w;
 }
 
-function demoAnswer(text) {
-  const t = text.trim();
-  const lower = t.toLowerCase();
-
-  // tiny helpful demo behaviors
-  if (lower.startsWith("/help") || lower === "help") {
-    return [
-      "DEMO режим (гость). Доступно:",
-      "- Напишите задачу обычным текстом",
-      "- /sum <текст> — краткое резюме",
-      "- /todo <текст> — чеклист",
-      "- /idea <тема> — 10 идей",
-      "\nЧтобы включить настоящий AI — войдите и настройте ключи/провайдера в бэкенде.",
-    ].join("\n");
-  }
-
-  if (lower.startsWith("/sum ")) {
-    const x = t.slice(5);
-    const s = x.split(/(?<=[.!?])\s+/).slice(0, 3).join(" ");
-    return `Кратко: ${s || x.slice(0, 200)}${x.length > 200 ? "…" : ""}`;
-  }
-
-  if (lower.startsWith("/todo ")) {
-    const x = t.slice(6);
-    const parts = x.split(/[,;\n]+/).map((p) => p.trim()).filter(Boolean);
-    const items = (parts.length ? parts : [x]).slice(0, 10);
-    return items.map((it) => `- [ ] ${it}`).join("\n");
-  }
-
-  if (lower.startsWith("/idea ")) {
-    const x = t.slice(6).trim() || "тема";
-    const ideas = Array.from({ length: 10 }, (_, i) => `- Идея ${i + 1} по теме «${x}»`);
-    return ["Вот 10 идей:", ...ideas].join("\n");
-  }
-
-  // default demo response
-  return [
-    "DEMO ответ (гостевой режим).",
-    "Я не подключён к бэкенду/провайдерам, но UI работает.",
-    "Вы написали:",
-    "```",
-    t,
-    "```",
-    "Подсказка: /help",
-  ].join("\n");
+async function logout(){
+  API.setToken("");
+  state.me=null; state.providers=[]; state.models={};
+  toast("Вы вышли", true);
+  setPage("chat");
 }
 
-// ---------- Projects ----------
-function projectsView() {
+// --- chat
+function chatView(){
+  const s = currentSettings();
   const w = el("div", "card");
+  const banner = !isAuthed() ? `<div class="pill warn">Гостевой DEMO: ответы генерируются локально</div>` : ``;
   w.innerHTML = `
-    <div class="row" style="justify-content:space-between">
-      <div>
-        <div class="h2">Проекты</div>
-        <div class="muted small">${API.token ? "Список из API" : "Локальные проекты (гость)"}</div>
+    ${banner}
+    <div class="chat ${s.chatCompact?"compact":""}" id="chat"></div>
+    <div class="hr"></div>
+    <div class="row" style="align-items:flex-end">
+      <button class="iconbtn" id="attach" title="Прикрепить">📎</button>
+      <div style="flex:1">
+        <textarea id="prompt" class="input" rows="3" placeholder="Напишите сообщение..."></textarea>
+        <div id="attList" class="att-list"></div>
       </div>
-      <span class="pill">${API.token ? "API" : "LOCAL"}</span>
+      <button class="btn primary" id="send">Отправить</button>
     </div>
-
-    <div class="hr"></div>
-
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <input id="name" class="input" placeholder="Название проекта" style="min-width:220px"/>
-      <input id="desc" class="input" placeholder="Описание" style="min-width:260px"/>
-      <select id="type" class="input" style="max-width:160px">
-        <option value="api">api</option>
-        <option value="frontend">frontend</option>
-        <option value="backend">backend</option>
-        <option value="bot">bot</option>
-        <option value="other">other</option>
-      </select>
-      <button id="create" class="btn primary">Создать</button>
-      <button id="exportP" class="btn">Экспорт</button>
-      <button id="importP" class="btn">Импорт</button>
+    <div class="row" style="margin-top:8px;justify-content:space-between">
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn" id="copyLast">Копировать ответ</button>
+        <button class="btn" id="exportChat">Экспорт чата</button>
+        <button class="btn" id="importChat">Импорт</button>
+      </div>
+      <div class="row" style="gap:8px">
+        <button class="btn" id="clearChat">Очистить</button>
+      </div>
     </div>
-
-    <div class="hr"></div>
-
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <input id="filter" class="input" placeholder="Фильтр" style="max-width:260px"/>
-      <select id="sort" class="input" style="max-width:200px">
-        <option value="new">Сначала новые</option>
-        <option value="old">Сначала старые</option>
-        <option value="name">По имени</option>
-      </select>
-      <button id="refresh" class="btn">Обновить</button>
-    </div>
-
-    <div class="hr"></div>
-
-    <div id="list" class="list muted">Загрузка...</div>
+    <input id="filePick" type="file" multiple style="display:none" />
   `;
 
-  setTimeout(async () => {
-    const list = $("#list", w);
-    const filter = $("#filter", w);
-    const sort = $("#sort", w);
+  function renderChat(){
+    const box = $("#chat", w);
+    box.innerHTML = "";
+    state.chat.forEach(m=>{
+      const item = el("div", "msg " + (m.role==="user"?"u":"a"));
+      const body = el("div","bubble");
+      body.innerHTML = s.chatMarkdown ? renderMarkdown(m.content||"") : `<pre class="plain">${esc(m.content||"")}</pre>`;
+      item.appendChild(body);
+      if(m.attachments?.length){
+        const at = el("div","att");
+        m.attachments.forEach(a=>{
+          const c = el("div","att-item");
+          if(a.type?.startsWith("image/") && a.dataUrl){ c.innerHTML = `<img src="${a.dataUrl}" alt="" /><div>${esc(a.name)}</div>`; }
+          else if(a.type?.startsWith("video/") && a.dataUrl){ c.innerHTML = `<video src="${a.dataUrl}" controls></video><div>${esc(a.name)}</div>`; }
+          else { c.innerHTML = `<div class="pill">${esc(a.type||"file")}</div><div>${esc(a.name)}</div>`; }
+          at.appendChild(c);
+        });
+        item.appendChild(at);
+      }
+      box.appendChild(item);
+    });
+    if(s.chatAutoscroll){ box.scrollTop = box.scrollHeight; }
+  }
 
-    function localSave() {
-      store.set("guest_projects", state.guestProjects);
+  function renderAttList(){
+    const a = $("#attList", w);
+    a.innerHTML = "";
+    if(!state.attachments.length) return;
+    state.attachments.forEach((f, idx)=>{
+      const chip = el("div","chip");
+      chip.innerHTML = `<span>${esc(f.name)}</span><button class="iconbtn" title="Удалить">✕</button>`;
+      chip.querySelector("button").onclick = ()=>{ state.attachments.splice(idx,1); renderAttList(); };
+      a.appendChild(chip);
+    });
+  }
+
+  async function pickFiles(files){
+    const maxMB = Number(s.maxAttachmentMB)||10;
+    for(const file of files){
+      if(file.size > maxMB*1024*1024){ toast(`Файл слишком большой: ${file.name} (лимит ${maxMB}MB)`, false); continue; }
+      const att = await fileToAttachment(file);
+      state.attachments.push(att);
     }
+    renderAttList();
+  }
 
-    function projectCard(p, isLocal = false) {
-      const c = el("div", "card");
-      const id = esc(p.id ?? "");
-      const name = esc(p.name ?? "(без названия)");
-      const desc = esc(p.description ?? "");
-      const type = esc(p.type ?? "");
-      const created = p.created_at ? fmtTime(p.created_at) : (p.ts ? fmtTime(p.ts) : "");
+  async function send(){
+    const prompt = $("#prompt", w).value.trim();
+    if(!prompt && !state.attachments.length) return;
+    const userMsg = { role:"user", content: prompt, ts: Date.now(), attachments: state.attachments.splice(0) };
+    state.chat.push(userMsg);
+    $("#prompt", w).value = "";
+    state.chatDraft = "";
+    saveLocal();
+    renderAttList();
+    renderChat();
 
+    try{
+      if(!isAuthed()){
+        const demo = await demoAnswer(prompt, userMsg.attachments);
+        await appendAssistant(demo, s.chatTypewriter);
+        return;
+      }
+      const payload = {
+        messages: state.chat.slice(-40).map(m=>({ role:m.role, content:m.content, attachments:m.attachments||[] }))
+      };
+      let data;
+      try{ data = await API.req("/ai/chat", { method:"POST", body: payload }); }
+      catch{ data = await API.req("/ai/ask", { method:"POST", body: payload }); }
+      const text = data?.answer || data?.message || data?.content || JSON.stringify(data);
+      await appendAssistant(text, s.chatTypewriter);
+    }catch(e){
+      await appendAssistant("Ошибка: " + e.message, false);
+    }
+  }
+
+  async function appendAssistant(text, typewriter){
+    const msg = { role:"assistant", content: String(text||""), ts: Date.now() };
+    state.chat.push(msg);
+    saveLocal();
+    if(!typewriter){ renderChat(); return; }
+    const full = msg.content;
+    msg.content = "";
+    renderChat();
+    for(let i=0;i<full.length;i++){
+      msg.content += full[i];
+      if(i%3===0){ renderChat(); await sleep(10); }
+    }
+    msg.content = full;
+    renderChat();
+  }
+
+  setTimeout(()=>{
+    renderChat();
+    const prompt = $("#prompt", w);
+    prompt.value = state.chatDraft || "";
+    prompt.addEventListener("input", ()=>{ state.chatDraft = prompt.value; saveLocal(); });
+    prompt.addEventListener("keydown", (ev)=>{
+      if((ev.ctrlKey||ev.metaKey) && ev.key==="Enter"){ ev.preventDefault(); send(); }
+      if(ev.key==="Escape"){ state.attachments=[]; renderAttList(); }
+    });
+
+    $("#send", w).onclick = send;
+    $("#attach", w).onclick = ()=> $("#filePick", w).click();
+    $("#filePick", w).onchange = (e)=> pickFiles(e.target.files||[]);
+
+    $("#clearChat", w).onclick = ()=>{ if(confirm("Очистить чат?")){ state.chat=[]; saveLocal(); renderChat(); } };
+    $("#copyLast", w).onclick = ()=>{
+      const last = [...state.chat].reverse().find(m=>m.role==="assistant");
+      if(!last) return toast("Нет ответа", false);
+      navigator.clipboard?.writeText(last.content||"").then(()=>toast("Скопировано", true)).catch(()=>toast("Clipboard недоступен", false));
+    };
+    $("#exportChat", w).onclick = ()=> exportJson("chat.json", state.chat);
+    $("#importChat", w).onclick = ()=> importJsonFile(async (data)=>{
+      if(Array.isArray(data)){ state.chat = data; saveLocal(); renderChat(); toast("Импортировано", true); }
+      else toast("Неверный файл", false);
+    });
+
+    renderAttList();
+  },0);
+  return w;
+}
+
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+
+async function fileToAttachment(file){
+  const base = { name: file.name, type: file.type, size: file.size };
+  if(file.type.startsWith("text/") && file.size < 200_000){
+    const t = await file.text();
+    return { ...base, text: t.slice(0, 200_000) };
+  }
+  if((file.type.startsWith("image/") || file.type.startsWith("video/")) && file.size < 5*1024*1024){
+    const dataUrl = await new Promise((res, rej)=>{
+      const fr = new FileReader();
+      fr.onload = ()=>res(String(fr.result));
+      fr.onerror = ()=>rej(new Error("read failed"));
+      fr.readAsDataURL(file);
+    });
+    return { ...base, dataUrl };
+  }
+  return base;
+}
+
+async function demoAnswer(prompt, attachments){
+  const files = attachments?.map(a=>a.name).filter(Boolean) || [];
+  const hint = files.length ? `\n\nВложения: ${files.join(", ")}` : "";
+  const text = (prompt||"").trim();
+  const bullets = [
+    "Я в гостевом режиме: это локальный DEMO-ответ.",
+    "Для реальных ответов подключи бэкенд и войди.",
+    "Локально работают: история, экспорт/импорт, вложения, проекты, медиа-инструменты."
+  ];
+  return `${bullets.join("\n")}${text?`\n\nТы написал: ${text}`:""}${hint}`;
+}
+
+function renderMarkdown(md){
+  const safe = esc(md);
+  let out = safe.replace(/```([\s\S]*?)```/g, (m, c)=>`<pre class="code">${c}</pre>`);
+  out = out.replace(/`([^`]+)`/g, (m,c)=>`<code>${c}</code>`);
+  out = out.replace(/\*\*([^*]+)\*\*/g, (m,c)=>`<b>${c}</b>`);
+  out = out.replace(/\n\n+/g, "<br><br>");
+  out = out.replace(/\n-\s+/g, "<br>• ");
+  out = out.replace(/(https?:\/\/[^\s<]+)/g, (m)=>`<a href="${m}" target="_blank" rel="noopener">${m}</a>`);
+  return `<div class="md">${out}</div>`;
+}
+
+// --- projects
+function projectsView(){
+  const w = el("div","card");
+  const authed = isAuthed();
+  w.innerHTML = `
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div class="h2">Проекты</div>
+      <span class="pill">${authed?"backend":"local"}</span>
+    </div>
+    <div class="hr"></div>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <input id="q" class="input" placeholder="Поиск..." style="flex:1;min-width:180px" />
+      <select id="sort" class="input" style="width:160px">
+        <option value="updated">Сначала новые</option>
+        <option value="name">По имени</option>
+      </select>
+      <button id="new" class="btn primary">Создать</button>
+    </div>
+    <div id="list" class="list" style="margin-top:10px"></div>
+  `;
+
+  async function load(){
+    if(authed){
+      try{
+        const data = await API.req("/projects?limit=200");
+        state.localProjects = (data.projects||[]).map(p=>({
+          id: p.id, name: p.name, desc: p.description||"", updated: Date.parse(p.updated_at||p.created_at||Date.now()) || Date.now(), backend:true
+        }));
+      }catch(e){
+        toast("Не удалось загрузить проекты с backend: " + e.message + " (показываю локальные)", false);
+      }
+    }
+    saveLocal();
+    renderList();
+  }
+
+  function renderList(){
+    const q = $("#q",w).value.trim().toLowerCase();
+    const sort = $("#sort",w).value;
+    let list = [...state.localProjects];
+    if(q) list = list.filter(p=> (p.name||"").toLowerCase().includes(q) || (p.desc||"").toLowerCase().includes(q));
+    if(sort==="name") list.sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+    else list.sort((a,b)=>(b.updated||0)-(a.updated||0));
+
+    const out = $("#list",w);
+    out.innerHTML = "";
+    if(!list.length){ out.innerHTML = `<div class="muted">Пусто</div>`; return; }
+    list.forEach(p=>{
+      const c = el("div","card");
       c.innerHTML = `
-        <div class="row" style="justify-content:space-between; gap:10px">
+        <div class="row" style="justify-content:space-between;align-items:flex-start">
           <div style="min-width:0">
-            <div class="h2">${name}</div>
-            <div class="muted small">${desc}</div>
-            <div class="muted small">${esc(type)} ${created ? "• " + esc(created) : ""}</div>
+            <div class="h2" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name||"(без названия)")}</div>
+            <div class="muted small" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.desc||"")}</div>
           </div>
-          <div class="row" style="gap:8px; flex-wrap:wrap; justify-content:flex-end">
-            <button class="btn" data-act="edit">Редакт.</button>
-            <button class="btn danger" data-act="del">Удалить</button>
+          <div class="row" style="gap:8px;flex-wrap:wrap;justify-content:flex-end">
+            <button class="btn" data-act="open" data-id="${esc(p.id)}">Открыть</button>
+            <button class="btn" data-act="edit" data-id="${esc(p.id)}">Редакт</button>
+            <button class="btn danger" data-act="del" data-id="${esc(p.id)}">Удалить</button>
           </div>
         </div>
       `;
-
-      const editBtn = c.querySelector('[data-act="edit"]');
-      const delBtn = c.querySelector('[data-act="del"]');
-
-      editBtn.onclick = async () => {
-        const newName = prompt("Название", p.name ?? "");
-        if (newName === null) return;
-        const newDesc = prompt("Описание", p.description ?? "");
-        if (newDesc === null) return;
-        const newType = prompt("Тип (api/frontend/backend/bot/other)", p.type ?? "api");
-        if (newType === null) return;
-
-        try {
-          if (API.token && !isLocal) {
-            // If backend supports PATCH/PUT - try PATCH, fallback PUT
-            try {
-              await API.req(`/projects/${encodeURIComponent(p.id)}`, { method: "PATCH", body: { name: newName, description: newDesc, type: newType } });
-            } catch {
-              await API.req(`/projects/${encodeURIComponent(p.id)}`, { method: "PUT", body: { name: newName, description: newDesc, type: newType } });
-            }
-            await load();
-          } else {
-            p.name = newName;
-            p.description = newDesc;
-            p.type = newType;
-            localSave();
-            await load();
-          }
-          toast("Сохранено");
-        } catch (e) {
-          toast(e.message, false);
-        }
+      out.appendChild(c);
+    });
+    out.querySelectorAll("button[data-act]").forEach(b=>{
+      b.onclick = ()=>{
+        const id = b.getAttribute("data-id");
+        const act = b.getAttribute("data-act");
+        const p = state.localProjects.find(x=>String(x.id)===String(id));
+        if(!p) return;
+        if(act==="open") openProject(p);
+        if(act==="edit") editProject(p);
+        if(act==="del") deleteProject(p);
       };
+    });
+  }
 
-      delBtn.onclick = async () => {
-        if (!confirm("Удалить проект?")) return;
-        try {
-          if (API.token && !isLocal) {
-            await API.req(`/projects/${encodeURIComponent(p.id)}`, { method: "DELETE" });
-            await load();
-          } else {
-            state.guestProjects = state.guestProjects.filter((x) => x.id !== p.id);
-            localSave();
-            await load();
-          }
-          toast("Удалено");
-        } catch (e) {
-          toast(e.message, false);
-        }
-      };
+  function openProject(p){
+    const msg = { role:"assistant", content:`Проект: **${p.name}**\n${p.desc||""}`.trim(), ts: Date.now() };
+    state.chat.push(msg);
+    saveLocal();
+    toast("Проект отправлен в чат", true);
+    setPage("chat");
+  }
+  function editProject(p){
+    const name = prompt("Название", p.name||"") ?? null;
+    if(name===null) return;
+    const desc = prompt("Описание", p.desc||"") ?? null;
+    if(desc===null) return;
+    p.name = name.trim();
+    p.desc = desc.trim();
+    p.updated = Date.now();
+    saveLocal();
+    renderList();
+  }
+  function deleteProject(p){
+    if(!confirm(`Удалить проект "${p.name}"?`)) return;
+    state.localProjects = state.localProjects.filter(x=>x!==p);
+    saveLocal();
+    renderList();
+  }
 
-      return c;
-    }
-
-    async function load() {
-      const q = (filter.value || "").trim().toLowerCase();
-      const s = sort.value;
-
-      list.innerHTML = "";
-
-      if (API.token) {
-        try {
-          const items = await API.req("/projects");
-          let arr = Array.isArray(items) ? items : items?.projects || [];
-          if (q) arr = arr.filter((p) => (p.name || "").toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q));
-          if (s === "name") arr.sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
-          if (s === "new") arr.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
-          if (s === "old") arr.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
-
-          if (!arr.length) {
-            list.textContent = "Пока проектов нет";
-            return;
-          }
-          arr.forEach((p) => list.appendChild(projectCard(p, false)));
-        } catch (e) {
-          list.textContent = "Ошибка: " + e.message;
-        }
-      } else {
-        let arr = state.guestProjects || [];
-        if (q) arr = arr.filter((p) => (p.name || "").toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q));
-        if (s === "name") arr = [...arr].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
-        if (s === "new") arr = [...arr].sort((a, b) => (b.ts || 0) - (a.ts || 0));
-        if (s === "old") arr = [...arr].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-
-        if (!arr.length) {
-          list.textContent = "Локальных проектов нет";
-          return;
-        }
-        arr.forEach((p) => list.appendChild(projectCard(p, true)));
-      }
-    }
-
-    $("#create", w).onclick = async () => {
-      const name = $("#name", w).value.trim() || "New Project";
-      const description = $("#desc", w).value.trim() || "";
-      const type = $("#type", w).value;
-
-      try {
-        if (API.token) {
-          await API.req("/projects", { method: "POST", body: { name, description, type, features: [] } });
-        } else {
-          state.guestProjects.unshift({ id: `g_${Math.random().toString(16).slice(2)}`, name, description, type, ts: Date.now() });
-          store.set("guest_projects", state.guestProjects);
-        }
-        $("#name", w).value = "";
-        $("#desc", w).value = "";
-        await load();
-        haptic("notify", "success");
-      } catch (e) {
-        toast(e.message, false);
-      }
+  setTimeout(()=>{
+    $("#q",w).oninput = renderList;
+    $("#sort",w).onchange = renderList;
+    $("#new",w).onclick = ()=>{
+      const name = prompt("Название проекта", "Новый проект");
+      if(!name) return;
+      state.localProjects.unshift({ id: "local_"+Math.random().toString(16).slice(2), name: name.trim(), desc: "", updated: Date.now(), backend:false });
+      saveLocal();
+      renderList();
     };
-
-    $("#refresh", w).onclick = load;
-
-    filter.addEventListener("input", debounce(load, 150));
-    sort.addEventListener("change", load);
-
-    // Export/import projects
-    $("#exportP", w).onclick = () => {
-      const payload = {
-        exported_at: new Date().toISOString(),
-        mode: API.token ? "api" : "local",
-        projects: API.token ? [] : state.guestProjects,
-      };
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-      const a = el("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `projects_${Date.now()}.json`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    };
-
-    $("#importP", w).onclick = () => {
-      const inp = el("input");
-      inp.type = "file";
-      inp.accept = "application/json";
-      inp.onchange = async () => {
-        const f = inp.files?.[0];
-        if (!f) return;
-        try {
-          const txt = await f.text();
-          const data = JSON.parse(txt);
-          if (!Array.isArray(data.projects)) throw new Error("Неверный формат: нет projects[]");
-          // import only to local store
-          state.guestProjects = data.projects.map((p) => ({
-            id: p.id || `g_${Math.random().toString(16).slice(2)}`,
-            name: p.name || "New Project",
-            description: p.description || "",
-            type: p.type || "other",
-            ts: p.ts || Date.now(),
-          }));
-          store.set("guest_projects", state.guestProjects);
-          await load();
-          toast("Импортировано в локальные проекты");
-        } catch (e) {
-          toast(e.message, false);
-        }
-      };
-      inp.click();
-    };
-
-    await load();
-  }, 0);
-
+    load();
+  },0);
   return w;
 }
 
-// ---------- Keys / Reminders / Calendar / Notifications / Admin ----------
-// These pages require login; in guest mode they are gated by view().
-
-function keysView() {
-  const w = el("div", "card");
+// --- Media
+function mediaView(){
+  const w = el("div","card");
   w.innerHTML = `
-    <div class="h2">Ключи провайдеров</div>
-    <div class="muted small">Ключи сохраняются в БД пользователя (шифруются). Без них провайдеры недоступны.</div>
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div class="h2">Медиа</div>
+      <div class="row" style="gap:8px">
+        <button class="btn" id="tabImg">Фото</button>
+        <button class="btn" id="tabVid">Видео</button>
+      </div>
+    </div>
+    <div class="hr"></div>
+    <div id="pane"></div>
+  `;
+  const pane = $("#pane",w);
+  const show = (tab)=>{
+    if(tab==="img") pane.replaceChildren(imageEditor());
+    else pane.replaceChildren(videoTools());
+  };
+  setTimeout(()=>{
+    $("#tabImg",w).onclick = ()=> show("img");
+    $("#tabVid",w).onclick = ()=> show("vid");
+    show("img");
+  },0);
+  return w;
+}
+
+function imageEditor(){
+  const wrap = el("div","");
+  wrap.innerHTML = `
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <input id="pick" type="file" accept="image/*" class="input" style="padding:10px" />
+      <button class="btn" id="paste">Вставить из буфера</button>
+      <button class="btn" id="toChat">В чат</button>
+      <button class="btn" id="savePng">Скачать PNG</button>
+    </div>
+    <div class="hr"></div>
+    <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-start">
+      <div style="flex:2;min-width:260px">
+        <canvas id="cv" class="canvas"></canvas>
+      </div>
+      <div style="flex:1;min-width:240px" class="card">
+        <div class="h2">Инструменты</div>
+        <div class="hr"></div>
+        <div class="row" style="justify-content:space-between"><div class="muted small">Поворот</div><div class="row" style="gap:6px"><button class="btn" id="rotL">⟲</button><button class="btn" id="rotR">⟳</button></div></div>
+        <div class="hr"></div>
+        <label class="muted small">Brightness</label><input id="br" type="range" min="50" max="150" value="100" />
+        <label class="muted small">Contrast</label><input id="ct" type="range" min="50" max="150" value="100" />
+        <label class="muted small">Saturate</label><input id="st" type="range" min="0" max="200" value="100" />
+        <div class="hr"></div>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <button class="btn" id="reset">Сброс</button>
+          <button class="btn" id="fit">Подогнать</button>
+        </div>
+        <div class="hr"></div>
+        <div class="muted small">Можно перетащить файл на canvas.</div>
+      </div>
+    </div>
+  `;
+
+  const cv = $("#cv", wrap);
+  const ctx = cv.getContext("2d");
+  let img = new Image();
+  let loaded = false;
+
+  function setCanvasSize(w,h){ cv.width = w; cv.height = h; }
+  function draw(){
+    if(!loaded) { ctx.clearRect(0,0,cv.width,cv.height); return; }
+    const f = state.media.image.filter;
+    ctx.save();
+    ctx.clearRect(0,0,cv.width,cv.height);
+    ctx.filter = `brightness(${f.brightness}%) contrast(${f.contrast}%) saturate(${f.saturate}%)`;
+    const rot = ((state.media.image.rotate%360)+360)%360;
+    const cw = cv.width, ch = cv.height;
+    ctx.translate(cw/2, ch/2);
+    ctx.rotate(rot * Math.PI/180);
+    const iw = img.width, ih = img.height;
+    const scale = Math.min(cw/iw, ch/ih);
+    ctx.drawImage(img, -iw*scale/2, -ih*scale/2, iw*scale, ih*scale);
+    ctx.restore();
+  }
+  function loadImageFromFile(file){
+    const url = URL.createObjectURL(file);
+    state.media.image.file = file;
+    state.media.image.url = url;
+    img = new Image();
+    img.onload = ()=>{
+      loaded = true;
+      setCanvasSize(Math.min(900, img.width), Math.min(650, img.height));
+      draw();
+    };
+    img.src = url;
+  }
+  function exportPngDataUrl(){ return cv.toDataURL("image/png"); }
+
+  setTimeout(()=>{
+    $("#pick", wrap).onchange = (e)=>{ const f = e.target.files?.[0]; if(f) loadImageFromFile(f); };
+    $("#rotL", wrap).onclick = ()=>{ state.media.image.rotate -= 90; draw(); };
+    $("#rotR", wrap).onclick = ()=>{ state.media.image.rotate += 90; draw(); };
+    $("#br", wrap).oninput = (e)=>{ state.media.image.filter.brightness = Number(e.target.value); draw(); };
+    $("#ct", wrap).oninput = (e)=>{ state.media.image.filter.contrast = Number(e.target.value); draw(); };
+    $("#st", wrap).oninput = (e)=>{ state.media.image.filter.saturate = Number(e.target.value); draw(); };
+    $("#reset", wrap).onclick = ()=>{
+      state.media.image.filter = { brightness:100, contrast:100, saturate:100 };
+      state.media.image.rotate = 0;
+      $("#br",wrap).value=100; $("#ct",wrap).value=100; $("#st",wrap).value=100;
+      draw();
+    };
+    $("#fit", wrap).onclick = ()=>{ if(loaded){ setCanvasSize(Math.min(900, img.width), Math.min(650, img.height)); draw(); } };
+    $("#savePng", wrap).onclick = ()=>{ if(!loaded) return toast("Сначала выбери фото", false); downloadDataUrl("image.png", exportPngDataUrl()); };
+    $("#toChat", wrap).onclick = async ()=>{
+      if(!loaded) return toast("Сначала выбери фото", false);
+      const dataUrl = exportPngDataUrl();
+      const att = { name:"edited.png", type:"image/png", size: dataUrl.length, dataUrl };
+      state.attachments.push(att);
+      toast("Добавлено во вложения чата", true);
+      setPage("chat");
+    };
+    $("#paste", wrap).onclick = async ()=>{
+      try{
+        const items = await navigator.clipboard.read();
+        for(const it of items){
+          for(const t of it.types){
+            if(t.startsWith("image/")){
+              const blob = await it.getType(t);
+              loadImageFromFile(new File([blob], "pasted.png", { type: t }));
+              return;
+            }
+          }
+        }
+        toast("В буфере нет изображения", false);
+      }catch{ toast("Clipboard API недоступен", false); }
+    };
+
+    cv.addEventListener("dragover", (e)=>{ e.preventDefault(); cv.classList.add("drag"); });
+    cv.addEventListener("dragleave", ()=> cv.classList.remove("drag"));
+    cv.addEventListener("drop", (e)=>{
+      e.preventDefault(); cv.classList.remove("drag");
+      const f = e.dataTransfer?.files?.[0];
+      if(f && f.type.startsWith("image/")) loadImageFromFile(f);
+    });
+  },0);
+  return wrap;
+}
+
+function videoTools(){
+  const wrap = el("div","");
+  wrap.innerHTML = `
+    <div class="muted">Базовый трим видео через FFmpeg.wasm (загрузка из CDN при первом запуске).</div>
+    <div class="hr"></div>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <input id="pick" type="file" accept="video/*" class="input" style="padding:10px" />
+      <button class="btn" id="trim">Trim</button>
+      <button class="btn" id="toChat">В чат</button>
+    </div>
+    <div class="row" style="gap:10px;flex-wrap:wrap;align-items:flex-start;margin-top:10px">
+      <div style="flex:2;min-width:260px">
+        <video id="v" controls class="video"></video>
+      </div>
+      <div style="flex:1;min-width:240px" class="card">
+        <div class="h2">Обрезка</div>
+        <div class="hr"></div>
+        <label class="muted small">Start (sec)</label>
+        <input id="start" class="input" type="number" min="0" step="0.1" value="0" />
+        <label class="muted small" style="margin-top:8px">End (sec)</label>
+        <input id="end" class="input" type="number" min="0" step="0.1" value="0" />
+        <div class="hr"></div>
+        <div id="log" class="muted small">Выбери файл…</div>
+      </div>
+    </div>
+  `;
+
+  const video = $("#v", wrap);
+  let lastOut = null;
+
+  function setLog(t){ $("#log",wrap).textContent = t; }
+
+  async function loadVideo(file){
+    const url = URL.createObjectURL(file);
+    state.media.video.file = file;
+    state.media.video.url = url;
+    video.src = url;
+    await new Promise(res=> video.onloadedmetadata = ()=>res());
+    const dur = video.duration || 0;
+    $("#start",wrap).value = 0;
+    $("#end",wrap).value = dur ? dur.toFixed(1) : 0;
+    setLog(`Длительность: ${dur.toFixed(1)}s`);
+  }
+
+  async function ensureFFmpeg(){
+    if(window.__ffmpegReady) return window.__ffmpeg;
+    setLog("Загрузка FFmpeg…");
+    await loadScript("https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js");
+    const { createFFmpeg, fetchFile } = window.FFmpeg;
+    const ffmpeg = createFFmpeg({ log: false });
+    await ffmpeg.load();
+    window.__ffmpegReady = true;
+    window.__ffmpeg = { ffmpeg, fetchFile };
+    setLog("FFmpeg готов");
+    return window.__ffmpeg;
+  }
+
+  async function trim(){
+    const file = state.media.video.file;
+    if(!file) return toast("Сначала выбери видео", false);
+    const start = Math.max(0, Number($("#start",wrap).value)||0);
+    const end = Math.max(0, Number($("#end",wrap).value)||0);
+    if(end && end <= start) return toast("End должен быть больше Start", false);
+
+    try{
+      const { ffmpeg, fetchFile } = await ensureFFmpeg();
+      setLog("Обрезка…");
+      ffmpeg.FS('writeFile', 'in.mp4', await fetchFile(file));
+      const args = end ? ['-ss', String(start), '-to', String(end), '-i', 'in.mp4', '-c', 'copy', 'out.mp4']
+                       : ['-ss', String(start), '-i', 'in.mp4', '-c', 'copy', 'out.mp4'];
+      await ffmpeg.run(...args);
+      const data = ffmpeg.FS('readFile', 'out.mp4');
+      lastOut = new Blob([data.buffer], { type: 'video/mp4' });
+      const url = URL.createObjectURL(lastOut);
+      video.src = url;
+      setLog("Готово: out.mp4");
+      toast("Trim готов", true);
+    }catch(e){
+      setLog("Ошибка: " + e.message);
+      toast(e.message, false);
+    }
+  }
+
+  setTimeout(()=>{
+    $("#pick",wrap).onchange = (e)=>{ const f = e.target.files?.[0]; if(f) loadVideo(f); };
+    $("#trim",wrap).onclick = trim;
+    $("#toChat",wrap).onclick = async ()=>{
+      if(!video.src) return toast("Нет видео", false);
+      let att;
+      if(lastOut && lastOut.size < 5*1024*1024){
+        const dataUrl = await blobToDataUrl(lastOut);
+        att = { name:"trimmed.mp4", type:"video/mp4", size:lastOut.size, dataUrl };
+      }else{
+        att = { name: lastOut?"trimmed.mp4":(state.media.video.file?.name||"video"), type:"video/mp4", size: lastOut?.size||0 };
+      }
+      state.attachments.push(att);
+      toast("Добавлено во вложения чата", true);
+      setPage("chat");
+    };
+  },0);
+  return wrap;
+}
+
+function loadScript(src){
+  return new Promise((res, rej)=>{
+    const s = document.createElement('script');
+    s.src = src; s.async = true;
+    s.onload = ()=>res();
+    s.onerror = ()=>rej(new Error('script load failed'));
+    document.head.appendChild(s);
+  });
+}
+function blobToDataUrl(blob){
+  return new Promise((res, rej)=>{
+    const fr = new FileReader();
+    fr.onload = ()=>res(String(fr.result));
+    fr.onerror = ()=>rej(new Error('read failed'));
+    fr.readAsDataURL(blob);
+  });
+}
+function downloadDataUrl(filename, dataUrl){
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// --- gated pages stubs
+function keysView(){ const w = el("div","card"); w.innerHTML = `<div class="h2">Ключи</div><div class="muted">Требуется backend.</div>`; return w; }
+function remindersView(){ const w = el("div","card"); w.innerHTML = `<div class="h2">Напоминания</div><div class="muted">Требуется backend.</div>`; return w; }
+function calendarView(){ const w = el("div","card"); w.innerHTML = `<div class="h2">Календарь</div><div class="muted">Требуется backend.</div>`; return w; }
+function notificationsView(){ const w = el("div","card"); w.innerHTML = `<div class="h2">Уведомления</div><div class="muted">Требуется backend.</div>`; return w; }
+
+// --- settings
+function settingsView(){
+  const authed = isAuthed();
+  const s = currentSettings();
+  const w = el("div","card");
+  w.innerHTML = `
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div class="h2">Настройки</div>
+      <span class="pill">${authed?"sync":"local"}</span>
+    </div>
     <div class="hr"></div>
 
-    <label class="small muted">Provider</label>
-    <select id="prov" class="input">
-      <option value="openai">openai</option>
-      <option value="groq">groq</option>
-      <option value="together">together</option>
-      <option value="mistral">mistral</option>
-      <option value="openrouter">openrouter</option>
-      <option value="deepseek">deepseek</option>
-      <option value="perplexity">perplexity</option>
-      <option value="fireworks">fireworks</option>
-      <option value="xai">xai</option>
-      <option value="custom">custom</option>
+    <div class="h2">Интерфейс</div>
+    <label class="muted small">Тема</label>
+    <select id="theme" class="input">
+      <option value="auto">auto</option>
+      <option value="light">light</option>
+      <option value="dark">dark</option>
     </select>
-
-    <div style="height:8px"></div>
-    <label class="small muted">API key</label>
-    <input id="key" class="input" placeholder="sk-..." />
-
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <button id="save" class="btn primary">Сохранить</button>
-      <button id="refresh" class="btn">Обновить</button>
-      <button id="providers" class="btn">Провайдеры/модели</button>
+    <label class="muted small" style="margin-top:8px">Размер шрифта</label>
+    <input id="fs" type="range" min="12" max="20" value="${esc(s.fontSize)}" />
+    <div class="row" style="justify-content:space-between;align-items:center;margin-top:6px">
+      <div>Reduce motion</div><input id="rm" type="checkbox" ${s.reduceMotion?"checked":""} />
     </div>
 
     <div class="hr"></div>
-    <div id="list" class="list muted">Загрузка...</div>
-  `;
-
-  setTimeout(async () => {
-    const list = $("#list", w);
-
-    async function load() {
-      try {
-        const items = await API.req("/ai/keys");
-        list.innerHTML = "";
-        (items || []).forEach((it) => {
-          const r = el("div", "row");
-          r.style.justifyContent = "space-between";
-          r.innerHTML = `<span class="pill">${esc(it.provider)}</span>
-                         <button class="btn danger" data-p="${esc(it.provider)}">Удалить</button>`;
-          list.appendChild(r);
-        });
-
-        if (!items?.length) list.textContent = "Ключей нет";
-
-        $$("button[data-p]", list).forEach((b) => {
-          b.onclick = async () => {
-            try {
-              const p = b.getAttribute("data-p");
-              await API.req(`/ai/keys/${encodeURIComponent(p)}`, { method: "DELETE" });
-              await boot();
-              await load();
-              haptic("notify", "success");
-            } catch (e) {
-              toast(e.message, false);
-            }
-          };
-        });
-      } catch (e) {
-        list.textContent = "Ошибка: " + e.message;
-      }
-    }
-
-    $("#save", w).onclick = async () => {
-      try {
-        const provider = $("#prov", w).value;
-        const api_key = $("#key", w).value.trim();
-        if (!api_key) return toast("Пустой ключ", false);
-        await API.req("/ai/keys", { method: "POST", body: { provider, api_key } });
-        $("#key", w).value = "";
-        await boot();
-        await load();
-        haptic("notify", "success");
-      } catch (e) {
-        toast(e.message, false);
-      }
-    };
-
-    $("#refresh", w).onclick = async () => {
-      await boot();
-      await load();
-    };
-
-    $("#providers", w).onclick = async () => {
-      try {
-        await boot();
-        toast("Список провайдеров/моделей обновлён");
-      } catch (e) {
-        toast(e.message, false);
-      }
-    };
-
-    await load();
-  }, 0);
-
-  return w;
-}
-
-function remindersView() {
-  const w = el("div", "card");
-  w.innerHTML = `
-    <div class="h2">Напоминания</div>
-    <div class="muted small">Создай напоминание (ISO дата). Пример: 2026-02-17T15:00:00</div>
-    <div class="hr"></div>
-
-    <input id="title" class="input" placeholder="Текст напоминания" />
-    <div style="height:8px"></div>
-    <input id="at" class="input" placeholder="remind_at (ISO)" />
+    <div class="h2">Чат</div>
+    <div class="row" style="justify-content:space-between;align-items:center"><div>Автоскролл</div><input id="as" type="checkbox" ${s.chatAutoscroll?"checked":""} /></div>
+    <div class="row" style="justify-content:space-between;align-items:center"><div>Markdown</div><input id="md" type="checkbox" ${s.chatMarkdown?"checked":""} /></div>
+    <div class="row" style="justify-content:space-between;align-items:center"><div>Typewriter</div><input id="tw" type="checkbox" ${s.chatTypewriter?"checked":""} /></div>
+    <div class="row" style="justify-content:space-between;align-items:center"><div>Compact</div><input id="cp" type="checkbox" ${s.chatCompact?"checked":""} /></div>
+    <div class="row" style="justify-content:space-between;align-items:center"><div>Haptics (TG)</div><input id="hp" type="checkbox" ${s.haptics?"checked":""} /></div>
+    <label class="muted small" style="margin-top:8px">Лимит вложений (MB)</label>
+    <input id="mb" class="input" type="number" min="1" max="50" value="${esc(s.maxAttachmentMB||10)}" />
 
     <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <button id="add" class="btn primary">Добавить</button>
-      <button id="refresh" class="btn">Обновить</button>
-      <button id="fillNow" class="btn">Сейчас+1ч</button>
+    <div class="h2">Сеть</div>
+    <label class="muted small">API base</label>
+    <input id="api" class="input" placeholder="/api/v1 или https://domain/api/v1" value="${esc(API.base)}" />
+    <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn" id="ping">Ping</button>
+      <button class="btn" id="copyApi">Копировать</button>
     </div>
 
     <div class="hr"></div>
-    <div id="list" class="list muted">Загрузка...</div>
-  `;
-
-  setTimeout(async () => {
-    const list = $("#list", w);
-
-    async function load() {
-      try {
-        const data = await API.req("/reminders");
-        state.reminders = data.reminders || [];
-        list.innerHTML = "";
-        state.reminders.forEach((r) => {
-          const c = el("div", "card");
-          c.innerHTML = `
-            <div class="row" style="justify-content:space-between; gap:10px">
-              <div>
-                <div class="h2">${esc(r.title)}</div>
-                <div class="muted small">${esc(r.remind_at || "")}</div>
-              </div>
-              <button class="btn danger" data-id="${esc(r.id)}">Удалить</button>
-            </div>
-          `;
-          list.appendChild(c);
-        });
-
-        if (!state.reminders.length) list.textContent = "Нет напоминаний";
-
-        $$("button[data-id]", list).forEach((b) => {
-          b.onclick = async () => {
-            try {
-              await API.req(`/reminders/${encodeURIComponent(b.getAttribute("data-id"))}`, { method: "DELETE" });
-              await load();
-              haptic("notify", "success");
-            } catch (e) {
-              toast(e.message, false);
-            }
-          };
-        });
-      } catch (e) {
-        list.textContent = "Ошибка: " + e.message;
-      }
-    }
-
-    $("#add", w).onclick = async () => {
-      try {
-        const title = $("#title", w).value.trim();
-        const remind_at = $("#at", w).value.trim();
-        await API.req(`/reminders?title=${encodeURIComponent(title)}&remind_at=${encodeURIComponent(remind_at)}`, { method: "POST" });
-        $("#title", w).value = "";
-        $("#at", w).value = "";
-        await load();
-        haptic("notify", "success");
-      } catch (e) {
-        toast(e.message, false);
-      }
-    };
-
-    $("#refresh", w).onclick = load;
-
-    $("#fillNow", w).onclick = () => {
-      const d = new Date(Date.now() + 60 * 60 * 1000);
-      $("#at", w).value = d.toISOString().slice(0, 19);
-    };
-
-    await load();
-  }, 0);
-
-  return w;
-}
-
-function calendarView() {
-  const w = el("div", "card");
-  w.innerHTML = `
-    <div class="h2">Календарь</div>
-    <div class="muted small">События пользователя (интеграция с Google Calendar через бэкенд)</div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <input id="from" class="input" placeholder="from (YYYY-MM-DD)" style="max-width:200px"/>
-      <input id="to" class="input" placeholder="to (YYYY-MM-DD)" style="max-width:200px"/>
-      <button id="load" class="btn primary">Загрузить</button>
-    </div>
-    <div class="hr"></div>
-    <div id="list" class="list muted">Выбери диапазон и нажми «Загрузить»</div>
-  `;
-
-  setTimeout(() => {
-    const list = $("#list", w);
-    $("#load", w).onclick = async () => {
-      try {
-        const from = $("#from", w).value.trim();
-        const to = $("#to", w).value.trim();
-        const data = await API.req(`/calendar?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
-        state.events = data.events || [];
-        list.innerHTML = "";
-        if (!state.events.length) {
-          list.textContent = "Событий нет";
-          return;
-        }
-        state.events.forEach((ev) => {
-          const c = el("div", "card");
-          c.innerHTML = `<div class="h2">${esc(ev.summary || ev.title || "Событие")}</div>
-                         <div class="muted small">${esc(ev.start || "")} → ${esc(ev.end || "")}</div>
-                         <div class="muted small">${esc(ev.location || "")}</div>`;
-          list.appendChild(c);
-        });
-      } catch (e) {
-        list.textContent = "Ошибка: " + e.message;
-      }
-    };
-  }, 0);
-
-  return w;
-}
-
-function notificationsView() {
-  const w = el("div", "card");
-  w.innerHTML = `
-    <div class="h2">Уведомления</div>
-    <div class="muted small">Требует бэкенд (push/email/telegram)</div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <button id="load" class="btn primary">Загрузить</button>
-      <button id="test" class="btn">Тестовое уведомление</button>
-    </div>
-    <div class="hr"></div>
-    <div id="list" class="list muted">Нажми «Загрузить»</div>
-  `;
-
-  setTimeout(() => {
-    const list = $("#list", w);
-    $("#load", w).onclick = async () => {
-      try {
-        const data = await API.req("/notifications");
-        state.notifications = data.notifications || [];
-        list.innerHTML = "";
-        if (!state.notifications.length) {
-          list.textContent = "Уведомлений нет";
-          return;
-        }
-        state.notifications.forEach((n) => {
-          const c = el("div", "card");
-          c.innerHTML = `<div class="h2">${esc(n.title || "Notification")}</div>
-                         <div class="muted small">${esc(n.body || "")}</div>
-                         <div class="muted small">${esc(n.created_at || "")}</div>`;
-          list.appendChild(c);
-        });
-      } catch (e) {
-        list.textContent = "Ошибка: " + e.message;
-      }
-    };
-
-    $("#test", w).onclick = async () => {
-      try {
-        await API.req("/notifications/test", { method: "POST", body: {} });
-        toast("Отправлено (если бэкенд поддерживает)");
-      } catch (e) {
-        toast(e.message, false);
-      }
-    };
-  }, 0);
-
-  return w;
-}
-
-function adminView() {
-  const w = el("div", "card");
-  w.innerHTML = `
-    <div class="h2">Админ</div>
-    <div class="muted small">Инструменты администратора (зависит от API)</div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <button id="health" class="btn primary">Health</button>
-      <button id="stats" class="btn">Stats</button>
-    </div>
-    <div class="hr"></div>
-    <pre class="code" id="out">—</pre>
-  `;
-
-  setTimeout(() => {
-    const out = $("#out", w);
-    $("#health", w).onclick = async () => {
-      try {
-        const data = await API.req("/health");
-        out.textContent = JSON.stringify(data, null, 2);
-      } catch (e) {
-        out.textContent = "Ошибка: " + e.message;
-      }
-    };
-    $("#stats", w).onclick = async () => {
-      try {
-        const data = await API.req("/admin/stats");
-        out.textContent = JSON.stringify(data, null, 2);
-      } catch (e) {
-        out.textContent = "Ошибка: " + e.message;
-      }
-    };
-  }, 0);
-
-  return w;
-}
-
-// ---------- Settings ----------
-function settingsView() {
-  const w = el("div", "card");
-
-  w.innerHTML = `
-    <div class="h2">Настройки</div>
-    <div class="muted small">Локальные настройки фронтенда (часть настроек пользователя хранится на бэкенде)</div>
-
-    <div class="hr"></div>
-
-    <label class="small muted">API base</label>
-    <input id="apibase" class="input" placeholder="/api/v1 или https://domain/api/v1" />
-    <div class="muted small" style="margin-top:6px">Для GitHub Pages поставь полный URL до бэкенда.</div>
-
-    <div class="hr"></div>
-
-    <div class="row" style="flex-wrap:wrap; gap:10px">
-      <div style="min-width:220px">
-        <label class="small muted">Тема</label>
-        <select id="theme" class="input">
-          <option value="auto">auto</option>
-          <option value="light">light</option>
-          <option value="dark">dark</option>
-        </select>
-      </div>
-      <div style="min-width:220px">
-        <label class="small muted">Уменьшить анимации</label>
-        <select id="motion" class="input">
-          <option value="0">нет</option>
-          <option value="1">да</option>
-        </select>
-      </div>
-    </div>
-
-    <div class="hr"></div>
-
-    <div class="row" style="flex-wrap:wrap; gap:8px">
+    <div class="row" style="gap:8px;flex-wrap:wrap">
       <button class="btn primary" id="save">Сохранить</button>
-      <button class="btn" id="clearLocal">Сбросить локальные данные</button>
-      <button class="btn" id="ping">Проверить API</button>
+      <button class="btn" id="export">Экспорт</button>
+      <button class="btn" id="import">Импорт</button>
+      <button class="btn danger" id="reset">Сброс локальных</button>
     </div>
-
-    <div class="hr"></div>
-
-    <pre class="code" id="out">—</pre>
+    <div class="muted small" style="margin-top:8px">Hotkeys: Ctrl/⌘ + 1..9, отправка: Ctrl/⌘+Enter</div>
   `;
 
-  setTimeout(() => {
-    const apibase = $("#apibase", w);
-    const theme = $("#theme", w);
-    const motion = $("#motion", w);
-    const out = $("#out", w);
+  setTimeout(()=>{
+    $("#theme",w).value = s.theme || "auto";
+    $("#theme",w).onchange = ()=>{ state.localSettings.theme = $("#theme",w).value; saveLocal(); applyTheme(); };
+    $("#fs",w).oninput = ()=>{ state.localSettings.fontSize = Number($("#fs",w).value); saveLocal(); applyTheme(); };
+    $("#rm",w).onchange = ()=>{ state.localSettings.reduceMotion = $("#rm",w).checked; saveLocal(); applyTheme(); };
 
-    apibase.value = API.base;
-    theme.value = state.ui.theme || "auto";
-    motion.value = state.ui.reduceMotion ? "1" : "0";
+    const bind = (id, key)=>{ $(id,w).onchange = ()=>{ state.localSettings[key] = $(id,w).checked; saveLocal(); }; };
+    bind("#as","chatAutoscroll");
+    bind("#md","chatMarkdown");
+    bind("#tw","chatTypewriter");
+    bind("#cp","chatCompact");
+    bind("#hp","haptics");
 
-    $("#save", w).onclick = () => {
-      API.setBase(apibase.value);
-      state.ui.theme = theme.value;
-      state.ui.reduceMotion = motion.value === "1";
-      store.setStr("theme", state.ui.theme);
-      store.set("reduce_motion", state.ui.reduceMotion);
+    $("#mb",w).oninput = ()=>{ state.localSettings.maxAttachmentMB = clamp(Number($("#mb",w).value)||10,1,50); saveLocal(); };
+    $("#api",w).onchange = ()=>{ API.setBase($("#api",w).value); toast("API base сохранён", true); };
+    $("#ping",w).onclick = pingApi;
+    $("#copyApi",w).onclick = ()=> navigator.clipboard?.writeText(API.base).then(()=>toast("Скопировано", true)).catch(()=>toast("Clipboard недоступен", false));
+    $("#export",w).onclick = exportAll;
+    $("#import",w).onclick = importAll;
+    $("#reset",w).onclick = ()=>{ if(confirm("Сбросить локальные данные?")) resetLocalData(); };
+
+    $("#save",w).onclick = async ()=>{
+      saveLocal();
       applyTheme();
-      toast("Сохранено");
-      render();
-    };
-
-    $("#clearLocal", w).onclick = () => {
-      if (!confirm("Сбросить локальные данные? (чат/проекты/настройки)")) return;
-      store.del("chat_history");
-      store.del("chat_draft");
-      store.del("guest_projects");
-      store.del("chat_settings");
-      store.del("theme");
-      store.del("reduce_motion");
-      state.chat = [];
-      state.chatDraft = "";
-      state.guestProjects = [];
-      state.chatSettings = { system: "", temperature: 0.7, max_tokens: 2048, json_mode: false, markdown: true, typewriter: true, auto_scroll: true };
-      state.ui.theme = "auto";
-      state.ui.reduceMotion = false;
-      applyTheme();
-      toast("Сброшено");
-      render();
-    };
-
-    $("#ping", w).onclick = async () => {
-      out.textContent = "Проверяю...";
-      try {
-        const data = await API.req("/health", { timeoutMs: 8000 });
-        out.textContent = JSON.stringify(data, null, 2);
-      } catch (e) {
-        out.textContent = "Ошибка: " + e.message;
-      }
-    };
-
-  }, 0);
-
-  return w;
-}
-
-// ---------- Diagnostics ----------
-function diagnosticsView() {
-  const w = el("div", "card");
-  const ua = navigator.userAgent;
-  const online = navigator.onLine;
-  const now = new Date();
-
-  w.innerHTML = `
-    <div class="h2">Диагностика</div>
-    <div class="muted small">Быстро понять, почему что-то не работает</div>
-
-    <div class="hr"></div>
-
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <span class="pill">${online ? "online" : "offline"}</span>
-      <span class="pill">API: ${esc(API.base)}</span>
-      <span class="pill">Token: ${API.token ? "yes" : "no"}</span>
-      <span class="pill">TG: ${tg ? "yes" : "no"}</span>
-    </div>
-
-    <div class="hr"></div>
-
-    <div class="row" style="flex-wrap:wrap; gap:8px">
-      <button class="btn primary" id="boot">Перезагрузить boot()</button>
-      <button class="btn" id="health">/health</button>
-      <button class="btn" id="whoami">/users/me</button>
-      <button class="btn" id="copy">Копировать отчёт</button>
-    </div>
-
-    <div class="hr"></div>
-
-    <pre class="code" id="out">—</pre>
-
-    <div class="hr"></div>
-    <div class="muted small">User-Agent</div>
-    <pre class="code">${esc(ua)}</pre>
-    <div class="muted small">Local time</div>
-    <pre class="code">${esc(now.toString())}</pre>
-  `;
-
-  setTimeout(() => {
-    const out = $("#out", w);
-
-    const report = async () => {
-      const rep = {
-        online: navigator.onLine,
-        api_base: API.base,
-        token: !!API.token,
-        tg: !!tg,
-        tg_initData_len: tg?.initData ? tg.initData.length : 0,
-        theme: state.ui.theme,
-        reduce_motion: state.ui.reduceMotion,
-        page: state.page,
-        chat_len: state.chat.length,
-        guest_projects_len: state.guestProjects.length,
-        me: state.me ? { email: state.me.email, is_admin: !!state.me.is_admin } : null,
-        ts: new Date().toISOString(),
-      };
-      out.textContent = JSON.stringify(rep, null, 2);
-      return rep;
-    };
-
-    $("#boot", w).onclick = async () => {
-      out.textContent = "boot()...";
-      try {
+      if(!authed){ toast("Сохранено локально", true); return; }
+      try{
+        const patch = {
+          theme: state.localSettings.theme,
+          haptics: state.localSettings.haptics,
+          auto_scroll_chat: state.localSettings.chatAutoscroll,
+        };
+        await API.req("/users/me/settings", { method:"PUT", body: patch });
         await boot();
-        await report();
-      } catch (e) {
-        out.textContent = "Ошибка: " + e.message;
-      }
+        toast("Синхронизировано", true);
+      }catch(e){ toast("Backend sync error: " + e.message, false); }
     };
-
-    $("#health", w).onclick = async () => {
-      out.textContent = "GET /health ...";
-      try {
-        const data = await API.req("/health", { timeoutMs: 8000 });
-        out.textContent = JSON.stringify(data, null, 2);
-      } catch (e) {
-        out.textContent = "Ошибка: " + e.message;
-      }
-    };
-
-    $("#whoami", w).onclick = async () => {
-      out.textContent = "GET /users/me ...";
-      try {
-        const data = await API.req("/users/me", { timeoutMs: 8000 });
-        out.textContent = JSON.stringify(data, null, 2);
-      } catch (e) {
-        out.textContent = "Ошибка: " + e.message;
-      }
-    };
-
-    $("#copy", w).onclick = async () => {
-      try {
-        const rep = await report();
-        await navigator.clipboard.writeText(JSON.stringify(rep, null, 2));
-        toast("Скопировано");
-      } catch (e) {
-        toast(e.message, false);
-      }
-    };
-
-    report();
-  }, 0);
+  },0);
 
   return w;
 }
 
-// ---------- Shortcuts ----------
-function shortcutsView() {
-  const w = el("div", "card");
-  w.innerHTML = `
-    <div class="h2">Горячие клавиши</div>
-    <div class="muted small">Работают в браузере и частично в Telegram WebView</div>
-    <div class="hr"></div>
-    <div class="list">
-      <div class="row" style="justify-content:space-between"><span>⌘/Ctrl+1</span><span class="muted">Чат</span></div>
-      <div class="row" style="justify-content:space-between"><span>⌘/Ctrl+2</span><span class="muted">Проекты</span></div>
-      <div class="row" style="justify-content:space-between"><span>⌘/Ctrl+7</span><span class="muted">Настройки</span></div>
-      <div class="row" style="justify-content:space-between"><span>⌘/Ctrl+8</span><span class="muted">Диагностика</span></div>
-      <div class="row" style="justify-content:space-between"><span>?</span><span class="muted">Эта страница</span></div>
-      <div class="row" style="justify-content:space-between"><span>/</span><span class="muted">Поиск в чате</span></div>
-      <div class="row" style="justify-content:space-between"><span>Ctrl/⌘+Enter</span><span class="muted">Отправить сообщение</span></div>
-      <div class="row" style="justify-content:space-between"><span>Right click</span><span class="muted">Удалить сообщение в чате</span></div>
-    </div>
-    <div class="hr"></div>
-    <div class="muted small">Подсказка: в DEMO чате есть команды /help /sum /todo /idea</div>
-  `;
+function adminView(){
+  if(!isAdmin()) return gate("Доступ только администратору.");
+  const w = el("div","card");
+  w.innerHTML = `<div class="h2">Админ</div><div class="muted">UI-заготовка. Требуется backend endpoints.</div>`;
   return w;
 }
 
-// ---------- Boot ----------
-async function boot() {
+// --- diagnostics / utils
+async function pingApi(){
+  try{
+    const t0 = performance.now();
+    let ok = null;
+    try{ ok = await API.req("/health"); }
+    catch{ ok = await API.req("/users/me"); }
+    const ms = Math.round(performance.now()-t0);
+    toast(`OK (${ms}ms)`, true);
+    return ok;
+  }catch(e){ toast("Ping failed: " + e.message, false); return null; }
+}
+
+function showDiagnostics(){
+  const info = {
+    authed: isAuthed(),
+    apiBase: API.base,
+    hasTG: !!tg,
+    tgInitData: !!tg?.initData,
+    ua: navigator.userAgent,
+    time: new Date().toISOString(),
+    localChatMessages: state.chat.length,
+    localProjects: state.localProjects.length
+  };
+  exportJson("diagnostics.json", info);
+  toast("diagnostics.json скачан", true);
+}
+
+function resetLocalData(){
+  const keep = { token: localStorage.getItem("token") || "" };
+  localStorage.clear();
+  if(keep.token) localStorage.setItem("token", keep.token);
+  state.chat = []; state.chatDraft=""; state.attachments=[];
+  state.localProjects = []; state.localSettings = {
+    theme:"auto", reduceMotion:false, fontSize:15, haptics:true,
+    chatAutoscroll:true, chatMarkdown:true, chatTypewriter:false, chatCompact:false, chatSound:false, maxAttachmentMB:10
+  };
+  API.setBase("/api/v1");
   applyTheme();
-
-  if (!API.token) {
-    state.me = null;
-    state.providers = [];
-    state.models = {};
-    render();
-    return;
-  }
-
-  try {
-    state.me = await API.req("/users/me", { timeoutMs: 12000 });
-  } catch (e) {
-    console.warn("/users/me failed:", e.message);
-    state.me = null;
-  }
-
-  try {
-    const data = await API.req("/ai/providers", { timeoutMs: 12000 });
-    state.providers = data.providers || data || [];
-    state.models = data.models || {};
-  } catch (e) {
-    console.warn("/ai/providers failed:", e.message);
-    state.providers = [];
-    state.models = {};
-  }
-
+  saveLocal();
   render();
 }
 
-// ---------- Global shortcuts ----------
-function bindGlobalShortcuts() {
-  window.addEventListener(
-    "keydown",
-    (ev) => {
-      const cmd = ev.ctrlKey || ev.metaKey;
-      if (cmd) {
-        const k = ev.key;
-        if (k === "1") return ev.preventDefault(), setPage("chat");
-        if (k === "2") return ev.preventDefault(), setPage("projects");
-        if (k === "3") return ev.preventDefault(), API.token ? setPage("keys") : toast("Нужен вход", false);
-        if (k === "4") return ev.preventDefault(), API.token ? setPage("reminders") : toast("Нужен вход", false);
-        if (k === "5") return ev.preventDefault(), API.token ? setPage("calendar") : toast("Нужен вход", false);
-        if (k === "6") return ev.preventDefault(), API.token ? setPage("notifications") : toast("Нужен вход", false);
-        if (k === "7") return ev.preventDefault(), setPage("settings");
-        if (k === "8") return ev.preventDefault(), setPage("diagnostics");
-        if (k === "9") return ev.preventDefault(), state.me?.is_admin ? setPage("admin") : toast("Только админ", false);
-      }
-      if (ev.key === "?") {
-        ev.preventDefault();
-        setPage("shortcuts");
-      }
-    },
-    { passive: false }
-  );
+function exportJson(filename, obj){
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
-// ---------- Init ----------
-window.addEventListener("unhandledrejection", (e) => {
-  console.error("Unhandled rejection:", e.reason);
-});
-window.addEventListener("error", (e) => {
-  console.error("Error:", e.error || e.message);
-});
+function importJsonFile(onData){
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json";
+  input.onchange = async ()=>{
+    const f = input.files?.[0];
+    if(!f) return;
+    try{
+      const txt = await f.text();
+      const data = JSON.parse(txt);
+      await onData(data);
+    }catch(e){ toast("Импорт не удался: " + e.message, false); }
+  };
+  input.click();
+}
 
-(async function init() {
-  bindGlobalShortcuts();
-  bindTelegramBackOnce();
+function exportAll(){
+  exportJson("ai-platform-export.json", {
+    version: 1,
+    apiBase: API.base,
+    localSettings: state.localSettings,
+    chat: state.chat,
+    localProjects: state.localProjects
+  });
+}
+
+function importAll(){
+  importJsonFile(async (data)=>{
+    if(!data || typeof data !== "object") return toast("Неверный формат", false);
+    if(data.apiBase) API.setBase(String(data.apiBase));
+    if(data.localSettings) state.localSettings = { ...state.localSettings, ...data.localSettings };
+    if(Array.isArray(data.chat)) state.chat = data.chat;
+    if(Array.isArray(data.localProjects)) state.localProjects = data.localProjects;
+    saveLocal();
+    applyTheme();
+    toast("Импортировано", true);
+    render();
+  });
+}
+
+// --- boot
+async function boot(){
+  applyTheme();
+  if(!isAuthed()){
+    state.me=null; state.providers=[]; state.models={};
+    render();
+    return;
+  }
+  try{
+    state.me = await API.req("/users/me");
+  }catch(e){
+    API.setToken("");
+    state.me=null;
+    render();
+    return;
+  }
+  try{
+    const m = await API.req("/ai/models");
+    state.providers = m.providers || [];
+    state.models = m.models || {};
+  }catch{ state.providers=[]; state.models={}; }
+  render();
+}
+
+// --- hotkeys
+window.addEventListener("keydown", (e)=>{
+  if((e.ctrlKey||e.metaKey) && !e.shiftKey){
+    const map = {"1":"chat","2":"projects","3":"media","4":"keys","5":"reminders","6":"calendar","7":"notifications","8":"settings","9":"admin"};
+    const p = map[e.key];
+    if(!p) return;
+    if(p==="admin" && !isAdmin()) return;
+    e.preventDefault();
+    setPage(p);
+  }
+});
+window.addEventListener("resize", ()=> closeDrawer());
+
+// --- init
+(async function init(){
   await telegramAutoLogin();
   await boot();
+  if(!state.page) state.page = "chat";
+  render();
 })();
