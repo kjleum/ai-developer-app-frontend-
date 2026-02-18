@@ -1,2360 +1,1919 @@
-/* AI Platform — Telegram Mini App-first frontend (no build tools)
-   Goals:
-   - Works in Telegram WebApp (TMA) and normal web
-   - Real routing, no duplicate UI
-   - Guest mode works (chat demo + local projects)
-   - Telegram WebApp API integration: ready/expand/theme/MainButton/BackButton/Haptics/CloudStorage/popups
-   - Media: attachments + image editor (canvas) + basic video trim via ffmpeg.wasm (optional)
-*/
-
-'use strict';
-
-// ---------- helpers ----------
-const $ = (sel, root=document) => root.querySelector(sel);
-const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
-const el = (tag, cls) => { const n = document.createElement(tag); if (cls) n.className = cls; return n; };
-const esc = (s)=> String(s ?? '').replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
-const clamp = (v,a,b)=> Math.min(b, Math.max(a, v));
-const sleep = (ms)=> new Promise(r=>setTimeout(r,ms));
-
-// ---------- Telegram ----------
+/* AI Platform — Telegram Mini App first (no frameworks, SPA) */
 const tg = window.Telegram?.WebApp || null;
 
-const TG = {
-  ready:false,
-  user:null,
-  init(){
-    if (!tg) return;
+const $ = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+const el = (tag, cls) => { const n=document.createElement(tag); if(cls) n.className=cls; return n; };
+const esc = (s)=> String(s??"").replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const uid = ()=> Math.random().toString(36).slice(2,10)+Date.now().toString(36);
+const clamp = (n,min,max)=> Math.max(min, Math.min(max, n));
 
-    try {
-      tg.ready();
-      tg.expand();
-      this.ready = true;
-    } catch {}
-
-    try {
-      this.user = tg.initDataUnsafe?.user || null;
-    } catch { this.user = null; }
-
-    this.applyTheme();
-
-    // theme changes
-    try {
-      tg.onEvent('themeChanged', () => this.applyTheme());
-    } catch {}
-
-    // viewport changes: save draft + rerender small layout fixes
-    try {
-      tg.onEvent('viewportChanged', () => {
-        persistDraft();
-        requestRender();
-      });
-    } catch {}
-
-    // avoid swipe-to-close glitches on iOS
-    try { document.body.style.overscrollBehavior = 'none'; } catch {}
-  },
-  applyTheme(){
-    const root = document.documentElement;
-    // defaults
-    const theme = tg?.themeParams || {};
-    const scheme = tg?.colorScheme || 'dark';
-
-    // Telegram passes hex strings like "#ffffff"
-    const pick = (key, fallback) => {
-      const v = theme?.[key];
-      if (typeof v === 'string' && v.trim()) return v.trim();
-      return fallback;
-    };
-
-    // Background / text
-    const bg = pick('bg_color', scheme === 'light' ? '#f8fafc' : '#0b1020');
-    const text = pick('text_color', scheme === 'light' ? '#0b1220' : '#e8eefc');
-    const hint = pick('hint_color', scheme === 'light' ? '#64748b' : 'rgba(232,238,252,.65)');
-    const sep = pick('secondary_bg_color', scheme === 'light' ? '#ffffff' : 'rgba(255,255,255,.06)');
-    const btn = pick('button_color', scheme === 'light' ? '#2ea6ff' : '#6ee7ff');
-
-    root.style.setProperty('--bg', bg);
-    root.style.setProperty('--text', text);
-    root.style.setProperty('--muted', hint);
-    root.style.setProperty('--card', sep);
-    // derive line & accent
-    root.style.setProperty('--line', scheme === 'light' ? 'rgba(15,23,42,.12)' : 'rgba(255,255,255,.12)');
-    root.style.setProperty('--accent', btn);
-
-    // Telegram may provide dark/light; keep our radius/shadow consistent
-  },
-  haptic(kind='impact', style='light'){
-    if (!tg) return;
-    if (Settings.get('haptics') === false) return;
-    try {
-      if (kind === 'impact') tg.HapticFeedback?.impactOccurred?.(style);
-      if (kind === 'notify') tg.HapticFeedback?.notificationOccurred?.(style);
-      if (kind === 'select') tg.HapticFeedback?.selectionChanged?.();
-    } catch {}
-  },
-  popup(title, message, buttons=[{type:'ok'}]){
-    if (tg?.showPopup) tg.showPopup({ title, message: String(message ?? ''), buttons });
-    else alert(`${title}: ${message}`);
-  },
-  confirm(title, message){
-    return new Promise((resolve)=>{
-      if (!tg?.showPopup) return resolve(confirm(`${title}\n\n${message}`));
-      tg.showPopup({
-        title,
-        message,
-        buttons: [{id:'ok', type:'default', text:'OK'}, {id:'cancel', type:'destructive', text:'Отмена'}]
-      }, (btnId)=> resolve(btnId === 'ok'));
-    });
-  },
-  toastOK(msg){ this.popup('Готово', msg); },
-  toastErr(msg){ this.popup('Ошибка', msg); },
-  sendData(payload){
-    if (!tg?.sendData) return;
-    try { tg.sendData(typeof payload === 'string' ? payload : JSON.stringify(payload)); } catch {}
-  },
-  setMainButton({text, visible, enabled, color}={}){
-    if (!tg?.MainButton) return;
-    if (typeof text === 'string') tg.MainButton.setText(text);
-    if (typeof color === 'string') tg.MainButton.color = color;
-    if (typeof enabled === 'boolean') enabled ? tg.MainButton.enable() : tg.MainButton.disable();
-    if (typeof visible === 'boolean') visible ? tg.MainButton.show() : tg.MainButton.hide();
-  },
-  setBackButton(visible){
-    if (!tg?.BackButton) return;
-    try { visible ? tg.BackButton.show() : tg.BackButton.hide(); } catch {}
-  },
-  cloudGet(key){
-    return new Promise((resolve)=>{
-      const cs = tg?.CloudStorage;
-      if (!cs?.getItem) return resolve(null);
-      try { cs.getItem(key, (err, value)=> resolve(err ? null : value)); } catch { resolve(null); }
-    });
-  },
-  cloudSet(key, value){
-    return new Promise((resolve)=>{
-      const cs = tg?.CloudStorage;
-      if (!cs?.setItem) return resolve(false);
-      try { cs.setItem(key, value, (err)=> resolve(!err)); } catch { resolve(false); }
-    });
-  },
-  cloudDel(key){
-    return new Promise((resolve)=>{
-      const cs = tg?.CloudStorage;
-      if (!cs?.removeItem) return resolve(false);
-      try { cs.removeItem(key, (err)=> resolve(!err)); } catch { resolve(false); }
-    });
-  },
+/* ----------------------- Storage helpers ----------------------- */
+const LS = {
+  get(k, d=null){ try{ const v=localStorage.getItem(k); return v? JSON.parse(v):d; }catch{return d;} },
+  set(k, v){ localStorage.setItem(k, JSON.stringify(v)); },
+  del(k){ localStorage.removeItem(k); }
 };
 
-// ---------- Settings / Storage ----------
-const LS = {
-  get(key, fallback=null){
-    try {
-      const raw = localStorage.getItem(key);
-      if (raw == null) return fallback;
-      return JSON.parse(raw);
-    } catch { return fallback; }
+const CLOUD = {
+  async available(){
+    try{ return !!tg?.CloudStorage; }catch{ return false; }
   },
-  set(key, value){
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  async get(key){
+    if(!(await this.available())) return null;
+    return new Promise((resolve)=> {
+      tg.CloudStorage.getItem(key, (err, v)=> resolve(err? null : v));
+    });
   },
-  del(key){
-    try { localStorage.removeItem(key); } catch {}
+  async set(key, value){
+    if(!(await this.available())) return false;
+    return new Promise((resolve)=> {
+      tg.CloudStorage.setItem(key, String(value), (err)=> resolve(!err));
+    });
   }
 };
 
-const Settings = {
-  key: 'aip.settings.v2',
-  data: {
-    theme: 'auto', // auto | light | dark
-    compact: false,
-    markdown: true,
-    typewriter: false,
-    reduceMotion: false,
-    haptics: true,
-    fontScale: 1.0,
-    apiBase: '/api/v1',
-    demoMode: true,
-    attachmentMaxMB: 8,
-    logToBot: false,
-    language: 'ru',
-  },
-  load(){
-    const saved = LS.get(this.key, null);
-    if (saved && typeof saved === 'object') this.data = { ...this.data, ...saved };
-    this.apply();
-  },
-  apply(){
-    // reduce motion toggle
-    document.documentElement.style.setProperty('font-size', `${clamp(this.data.fontScale, 0.85, 1.35) * 16}px`);
-    if (this.data.reduceMotion) document.documentElement.classList.add('rm');
-    else document.documentElement.classList.remove('rm');
+/* ----------------------- App state ----------------------- */
+const state = {
+  ready:false,
 
-    // theme override (Telegram theme still supplies colors, but we can force scheme-ish feel)
-    if (this.data.theme === 'light') {
-      document.documentElement.style.setProperty('--bg', '#f8fafc');
-      document.documentElement.style.setProperty('--text', '#0b1220');
-      document.documentElement.style.setProperty('--muted', '#64748b');
-      document.documentElement.style.setProperty('--line', 'rgba(15,23,42,.12)');
-      document.documentElement.style.setProperty('--card', '#ffffff');
-    }
-    if (this.data.theme === 'dark') {
-      document.documentElement.style.setProperty('--bg', '#0b1020');
-      document.documentElement.style.setProperty('--text', '#e8eefc');
-      document.documentElement.style.setProperty('--muted', 'rgba(232,238,252,.65)');
-      document.documentElement.style.setProperty('--line', 'rgba(255,255,255,.12)');
-      document.documentElement.style.setProperty('--card', 'rgba(255,255,255,.06)');
-    }
-    // if auto: use Telegram theme (already applied by TG.applyTheme)
-  },
-  get(k){ return this.data[k]; },
-  set(k, v){ this.data[k]=v; LS.set(this.key, this.data); this.apply(); },
-  export(){ return { ...this.data }; },
-  import(obj){ if (obj && typeof obj === 'object') { this.data = { ...this.data, ...obj }; LS.set(this.key,this.data); this.apply(); } }
+  // tma
+  tgUser: null,
+  tgTheme: null,
+
+  // auth/API (optional)
+  apiBase: LS.get("apiBase", "/api/v1"),
+  token: LS.get("token", ""),
+
+  // routing
+  route: { name:"chat", params:{} }, // chat|projects|media|settings|diagnostics|project|chat
+  drawerOpen:false,
+
+  // data
+  projects: LS.get("projects", []),
+  activeProjectId: LS.get("activeProjectId", null),
+  chats: LS.get("chats", {}), // projectId -> [{id,title,messages:[...]}]
+  activeChatId: LS.get("activeChatId", null),
+
+  // ui
+  composing:"",
+  attachments: [], // pending attachments for current send
+  searchQuery:"",
+  model: LS.get("model","DEMO"),
+  models: ["DEMO","GPT-4","Claude","Llama","Custom"],
+
+  settings: LS.get("settings", {
+    theme: "telegram", // telegram|dark|light
+    reduce_motion: false,
+    haptics: true,
+    enter_to_send: true,
+    markdown: true,
+    streaming: true,
+    compact: false,
+    max_inline_mb: 4,
+    save_to_cloud: true
+  }),
 };
 
-// ---------- API wrapper ----------
+/* ----------------------- Telegram integration ----------------------- */
+function applyTelegramTheme(){
+  if(!tg) return;
+  const p = tg.themeParams || {};
+  state.tgTheme = p;
+
+  // Telegram can provide hex colors; fall back to defaults
+  const css = document.documentElement.style;
+
+  // helper: accept Telegram format like "#fff" or "rgb()"
+  const set = (varName, val)=> { if(val) css.setProperty(varName, val); };
+
+  // main colors
+  set("--bg", p.bg_color);
+  set("--text", p.text_color);
+  set("--muted", p.hint_color);
+  set("--accent", p.button_color);
+  set("--line", p.hint_color ? `${p.hint_color}33` : null); // 20% alpha
+
+  // derive panel/card if Telegram provides section_bg_color
+  if(p.secondary_bg_color) set("--panel", p.secondary_bg_color);
+  if(p.section_bg_color) set("--card", p.section_bg_color);
+
+  // safe areas: Telegram viewport is already safe-ish, but iOS notch still applies via env()
+}
+
+function applyThemeOverride(){
+  // user override theme (telegram/dark/light)
+  const t = state.settings.theme;
+  if(t === "telegram") return; // keep tg theme / defaults
+
+  const css = document.documentElement.style;
+  if(t === "light"){
+    css.setProperty("--bg", "#f8fafc");
+    css.setProperty("--text", "#0b1220");
+    css.setProperty("--muted", "#64748b");
+    css.setProperty("--line", "#e2e8f0");
+    css.setProperty("--card", "rgba(0,0,0,.03)");
+  }else if(t === "dark"){
+    css.setProperty("--bg", "#0b0f17");
+    css.setProperty("--text", "#e5e7eb");
+    css.setProperty("--muted", "#94a3b8");
+    css.setProperty("--line", "rgba(148,163,184,.18)");
+    css.setProperty("--card", "rgba(255,255,255,.04)");
+  }
+}
+
+function haptic(kind="impact", style="light"){
+  if(!tg) return;
+  if(state.settings.haptics === false) return;
+  try{
+    if(kind==="impact") tg.HapticFeedback.impactOccurred(style);
+    if(kind==="notify") tg.HapticFeedback.notificationOccurred(style);
+    if(kind==="select") tg.HapticFeedback.selectionChanged();
+  }catch{}
+}
+
+function tgToast(title, message){
+  if(tg?.showPopup){
+    tg.showPopup({title, message: String(message), buttons:[{type:"ok"}]});
+  }else{
+    toast(`${title}: ${message}`, false);
+  }
+}
+
+/* ----------------------- Toasts ----------------------- */
+let toastTimer = null;
+function toast(message, ok=true, ms=2200){
+  const wrap = $(".toast-wrap");
+  if(!wrap) return;
+  wrap.innerHTML = "";
+  const t = el("div","toast");
+  t.innerHTML = `<div class="${ok?'':'muted'}">${esc(message)}</div>`;
+  wrap.appendChild(t);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=> { wrap.innerHTML=""; }, ms);
+}
+
+/* ----------------------- Router ----------------------- */
+function parseHash(){
+  const raw = location.hash.replace(/^#\/?/, "");
+  const [path, query=""] = raw.split("?");
+  const parts = (path || "chat").split("/").filter(Boolean);
+  const name = parts[0] || "chat";
+  const params = {};
+  if(name === "project") params.id = parts[1] || null;
+  if(name === "chat") params.id = parts[1] || null;
+  if(query){
+    query.split("&").forEach(kv=>{
+      const [k,v=""] = kv.split("=");
+      params[decodeURIComponent(k)] = decodeURIComponent(v);
+    });
+  }
+  return {name, params};
+}
+function go(hash){
+  if(hash.startsWith("#")) location.hash = hash;
+  else location.hash = "#/"+hash.replace(/^\/?/,"");
+}
+function setRoute(r){
+  state.route = r;
+  render();
+  syncTgButtons();
+}
+
+/* ----------------------- Data model ----------------------- */
+function ensureProject(){
+  if(state.projects.length===0){
+    const p = {id: uid(), name:"Первый проект", color:"#60a5fa", archived:false, created_at: Date.now(), template:"empty"};
+    state.projects.unshift(p);
+    state.activeProjectId = p.id;
+    state.chats[p.id] = [{id: uid(), title:"Новый чат", created_at: Date.now(), messages: []}];
+    state.activeChatId = state.chats[p.id][0].id;
+    persistAll();
+  }
+  if(!state.activeProjectId || !state.projects.some(p=>p.id===state.activeProjectId)){
+    state.activeProjectId = state.projects[0].id;
+  }
+  state.chats[state.activeProjectId] ??= [{id: uid(), title:"Новый чат", created_at: Date.now(), messages: []}];
+  if(!state.activeChatId || !state.chats[state.activeProjectId].some(c=>c.id===state.activeChatId)){
+    state.activeChatId = state.chats[state.activeProjectId][0]?.id || null;
+  }
+}
+
+function persistAll(){
+  LS.set("projects", state.projects);
+  LS.set("activeProjectId", state.activeProjectId);
+  LS.set("chats", state.chats);
+  LS.set("activeChatId", state.activeChatId);
+  LS.set("settings", state.settings);
+  LS.set("model", state.model);
+  LS.set("apiBase", state.apiBase);
+  LS.set("token", state.token);
+}
+
+function currentProject(){
+  return state.projects.find(p=>p.id===state.activeProjectId) || null;
+}
+function currentChat(){
+  const arr = state.chats[state.activeProjectId] || [];
+  return arr.find(c=>c.id===state.activeChatId) || null;
+}
+
+/* ----------------------- API (optional backend) ----------------------- */
 const API = {
-  token: LS.get('aip.token',''),
-  get base(){ return Settings.get('apiBase') || '/api/v1'; },
-  setToken(t){ this.token = t || ''; LS.set('aip.token', this.token); },
-  clearToken(){ this.token=''; LS.del('aip.token'); },
-  async req(path, {method='GET', body=null, headers={}} = {}){
+  async req(path, {method="GET", body=null, headers={}} = {}){
     const ctrl = new AbortController();
-    const t = setTimeout(()=>ctrl.abort(), 30000);
-    try {
-      const h = { ...headers };
-      if (body && !(body instanceof FormData)) h['Content-Type'] = 'application/json';
-      if (this.token) h['Authorization'] = `Bearer ${this.token}`;
-      const res = await fetch(this.base + path, {
-        method,
-        headers: h,
-        body: body ? (body instanceof FormData ? body : JSON.stringify(body)) : null,
-        signal: ctrl.signal
-      });
-      const text = await res.text();
-      let data = null;
-      try { data = text ? JSON.parse(text) : null; } catch { data = { raw:text }; }
-      if (!res.ok) {
-        const msg = data?.detail || data?.error || text || 'Request failed';
-        throw new Error(msg);
-      }
+    const timer = setTimeout(()=> ctrl.abort(), 30000);
+    try{
+      const h = {"Content-Type":"application/json", ...headers};
+      if(state.token) h.Authorization = `Bearer ${state.token}`;
+      const res = await fetch(state.apiBase + path, {method, headers:h, body: body?JSON.stringify(body):null, signal: ctrl.signal});
+      const txt = await res.text();
+      let data=null; try{ data = txt?JSON.parse(txt):null; }catch{ data={raw:txt}; }
+      if(!res.ok) throw new Error(data?.detail || data?.error || txt || "Request failed");
       return data;
-    } finally {
-      clearTimeout(t);
+    }finally{
+      clearTimeout(timer);
     }
   },
   async ping(){
     const t0 = performance.now();
-    await this.req('/ping', {method:'GET'});
+    await this.req("/health", {method:"GET"}); // if exists
     return Math.round(performance.now()-t0);
   }
 };
 
-// ---------- App State ----------
-const State = {
-  route: 'chat',
-  // chat: [{id, role:'me'|'ai'|'sys', text, ts, attachments:[] }]
-  chat: LS.get('aip.chat.v2', []),
-  draft: LS.get('aip.draft.v2', { text:'', attachments:[] }),
-  // projects: [{id, name, desc, tags:[], updatedAt, chats:[messageIds], files:[] }]
-  projects: LS.get('aip.projects.v2', []),
-  activeProjectId: LS.get('aip.activeProject', null),
-  // ui
-  drawerOpen:false,
-  modal:null,
-  // media
-  media: {
-    image: { src:null, filters:{brightness:1, contrast:1, saturate:1}, rotate:0 },
-    video: { file:null, url:null, start:0, end:0, working:false, ffmpegReady:false }
+async function telegramAutoInit(){
+  if(!tg) return;
+  try{
+    tg.ready();
+    tg.expand();
+    applyTelegramTheme();
+    applyThemeOverride();
+
+    // store user
+    state.tgUser = tg.initDataUnsafe?.user || null;
+
+    // react to theme changes
+    tg.onEvent?.("themeChanged", ()=>{
+      applyTelegramTheme();
+      applyThemeOverride();
+      render();
+    });
+
+    tg.onEvent?.("viewportChanged", ()=>{
+      // could save draft on minimize / resize, etc.
+      persistAll();
+    });
+  }catch{}
+}
+
+/* ----------------------- UI pieces ----------------------- */
+function navItems(){
+  // Keep minimal for now; advanced sections can be added later
+  return [
+    ["chat","Чат"],
+    ["projects","Проекты"],
+    ["media","Медиа"],
+    ["settings","Настройки"],
+    ["diagnostics","Диагностика"],
+  ];
+}
+
+function topbarTitle(){
+  const r = state.route.name;
+  if(r==="chat") return "Чат";
+  if(r==="projects") return "Проекты";
+  if(r==="project") return "Проект";
+  if(r==="media") return "Медиа";
+  if(r==="settings") return "Настройки";
+  if(r==="diagnostics") return "Диагностика";
+  return "AI Platform";
+}
+
+function userLabel(){
+  if(state.tgUser){
+    const n = [state.tgUser.first_name, state.tgUser.last_name].filter(Boolean).join(" ");
+    return n || "User";
   }
-};
-
-function persistChat(){ LS.set('aip.chat.v2', State.chat); }
-function persistProjects(){ LS.set('aip.projects.v2', State.projects); LS.set('aip.activeProject', State.activeProjectId); }
-function persistDraft(){ LS.set('aip.draft.v2', State.draft); }
-
-// ---------- Router ----------
-const ROUTES = [
-  {id:'chat', title:'Чат'},
-  {id:'projects', title:'Проекты'},
-  {id:'media', title:'Медиа'},
-  {id:'keys', title:'Ключи'},
-  {id:'reminders', title:'Напоминания'},
-  {id:'calendar', title:'Календарь'},
-  {id:'notifications', title:'Уведомления'},
-  {id:'settings', title:'Настройки'},
-  {id:'diagnostics', title:'Диагностика'},
-];
-
-const protectedRoutes = new Set(['keys','reminders','calendar','notifications']);
-
-function setRoute(route){
-  if (!ROUTES.find(r=>r.id===route)) route='chat';
-  State.route = route;
-  TG.haptic('select');
-  requestRender();
+  return "Guest";
 }
 
-function routeTitle(){
-  return ROUTES.find(r=>r.id===State.route)?.title || 'AI Platform';
+function userMenuButton(){
+  const btn = el("button","btn");
+  btn.innerHTML = `<span class="pill" style="border:none;background:transparent;padding:0">${esc(userLabel())}</span>`;
+  btn.onclick = ()=> { haptic("select"); openUserMenu(); };
+  return btn;
 }
 
-function isAuthed(){ return !!API.token; }
+function openDrawer(){ state.drawerOpen=true; render(); }
+function closeDrawer(){ state.drawerOpen=false; render(); }
 
-// ---------- UI: rendering cycle ----------
-let renderQueued=false;
-function requestRender(){
-  if (renderQueued) return;
-  renderQueued=true;
-  requestAnimationFrame(()=>{ renderQueued=false; render(); });
-}
-
-function render(){
-  const root = $('#app');
-  root.innerHTML='';
-
-  const backdrop = el('div','backdrop');
-  backdrop.onclick = ()=>{ State.drawerOpen=false; requestRender(); };
-  if (State.drawerOpen) backdrop.classList.add('show');
-  root.appendChild(backdrop);
-
-  // drawer
-  const drawer = renderSidebar(true);
-  if (State.drawerOpen) drawer.classList.add('open');
-  root.appendChild(drawer);
-
-  const shell = el('div','shell safe');
-  // wide sidebar
-  shell.appendChild(renderSidebar(false));
-
-  const main = el('div','main');
-  main.appendChild(renderTopbar());
-
-  const content = el('div','content');
-  content.appendChild(renderView());
-  main.appendChild(content);
-
-  shell.appendChild(main);
-  root.appendChild(shell);
-
-  root.appendChild(renderBottomNav());
-
-  // Telegram nav buttons
-  if (tg) {
-    // BackButton behavior:
-    // - if modal open: close modal
-    // - else if route not chat: back to chat
-    // - else: close mini app
-    TG.setBackButton(State.route !== 'chat' || !!State.modal);
-    try {
-      if (!render._tgBackBound) {
-        render._tgBackBound = true;
-        tg.BackButton.onClick(()=>{
-          if (State.modal) { State.modal=null; requestRender(); return; }
-          if (State.route !== 'chat') { setRoute('chat'); return; }
-          tg.close();
-        });
-      }
-    } catch {}
-
-    // MainButton context
-    if (State.route === 'chat') {
-      const canSend = ($('#msgText')?.value || '').trim().length > 0 || (State.draft.attachments?.length||0)>0;
-      TG.setMainButton({ text: 'Отправить', visible: true, enabled: canSend });
-      try {
-        if (!render._tgMainBound) {
-          render._tgMainBound = true;
-          tg.MainButton.onClick(()=> sendMessage());
-        }
-      } catch {}
-    } else {
-      TG.setMainButton({ visible: false });
-    }
-  }
-
-  // focus input in chat
-  if (State.route === 'chat') {
-    const ta = $('#msgText');
-    if (ta && document.activeElement !== ta) {
-      // don't steal focus if user is scrolling in messages
-      if (!render._focusedOnce) {
-        render._focusedOnce = true;
-        ta.focus();
-      }
-    }
-  }
-
-  // modal
-  if (State.modal) root.appendChild(renderModal());
-}
-
-function renderTopbar(){
-  const t = el('div','topbar');
-  const inner = el('div','topbar-inner');
-
-  const left = el('div','title');
-  const burger = el('button','btn');
-  burger.textContent = '☰';
-  burger.onclick = ()=>{ State.drawerOpen=true; requestRender(); };
-
-  const h1 = el('h1');
-  h1.textContent = routeTitle();
-
-  left.appendChild(burger);
-  left.appendChild(h1);
-
-  const right = el('div','row');
-
-  // user pill (avatar + name / guest)
-  const pill = el('div','pill');
-  const name = TG.user?.first_name || TG.user?.username || (isAuthed() ? 'User' : 'Guest');
-  const avatar = TG.user?.photo_url || null;
-  if (avatar) {
-    const img = el('img'); img.alt=''; img.src = avatar; pill.appendChild(img);
-  }
-  const span = el('span'); span.textContent = name; pill.appendChild(span);
-  pill.title = 'Меню';
-  pill.onclick = ()=>{ State.modal = {type:'quick'}; requestRender(); };
-
-  right.appendChild(pill);
-
-  inner.appendChild(left);
-  inner.appendChild(right);
-  t.appendChild(inner);
-  return t;
-}
-
-function renderSidebar(isDrawer){
-  const sb = el('div', isDrawer ? 'sidebar drawer' : 'sidebar');
-
-  // header card
-  const head = el('div','card section');
+function sidebar(isDrawer){
+  const sb = el("div", isDrawer ? "sidebar drawer" : "sidebar");
+  const head = el("div","card");
+  const p = currentProject();
   head.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+    <div class="row" style="justify-content:space-between">
       <div>
-        <div style="font-weight:800;letter-spacing:.3px;">AI Platform</div>
-        <div class="muted small">Telegram Mini App</div>
+        <div class="h2">AI Platform</div>
+        <div class="muted small">${tg ? "Telegram Mini App" : "Web"}</div>
       </div>
-      <button class="btn ghost" id="closeDrawer" style="display:${isDrawer?'inline-flex':'none'}">✕</button>
+      <div class="pill" title="Модель">${esc(state.model)}</div>
+    </div>
+    <div class="hr"></div>
+    <div class="row" style="justify-content:space-between;align-items:flex-start">
+      <div style="min-width:0">
+        <div class="muted small">Проект</div>
+        <div style="font-weight:900;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p?.name || "—")}</div>
+      </div>
+      <button class="btn icon" id="${isDrawer?'sb':'ds'}_proj">▾</button>
     </div>
   `;
   sb.appendChild(head);
 
-  const nav = el('div','nav');
-  const items = [
-    ['chat','Чат'],
-    ['projects','Проекты'],
-    ['media','Медиа'],
-    ['settings','Настройки'],
-    ['diagnostics','Диагностика'],
-  ];
-
-  // show protected routes only when authed, otherwise hide (no empty dead buttons)
-  if (isAuthed()) {
-    items.splice(3,0, ['keys','Ключи'], ['reminders','Напоминания'], ['calendar','Календарь'], ['notifications','Уведомления']);
-  }
-
-  items.forEach(([id,label])=>{
-    const b = el('button','btn navbtn' + (State.route===id?' active':''));
-    b.innerHTML = `<span>${esc(label)}</span><span class="muted small">›</span>`;
-    b.onclick = ()=>{ setRoute(id); State.drawerOpen=false; requestRender(); };
+  const nav = el("div","");
+  navItems().forEach(([id,label])=>{
+    const b = el("button","navbtn"+(state.route.name===id?" active":""));
+    b.innerHTML = `<span>${label}</span>`;
+    b.onclick = ()=>{ haptic("select"); go(id); if(isDrawer) closeDrawer(); };
     nav.appendChild(b);
   });
-
   sb.appendChild(nav);
 
-  const quick = el('div','card section');
+  const quick = el("div","card");
   quick.innerHTML = `
-    <div style="font-weight:700;">Быстро</div>
+    <div class="h2">Быстро</div>
     <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap;">
-      <button class="btn primary" id="newChat">Новый чат</button>
-      <button class="btn" id="exportAll">Экспорт</button>
-      <button class="btn" id="importAll">Импорт</button>
-    </div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap;">
-      <button class="btn" id="sendToBot">Отправить в бота</button>
-      <button class="btn danger" id="resetLocal">Сброс локальных</button>
+    <div class="row" style="flex-wrap:wrap">
+      <button class="btn primary" id="${isDrawer?'sb':'ds'}_newchat">Новый чат</button>
+      <button class="btn" id="${isDrawer?'sb':'ds'}_export">Экспорт</button>
+      <button class="btn" id="${isDrawer?'sb':'ds'}_import">Импорт</button>
     </div>
   `;
   sb.appendChild(quick);
 
-  // bind
-  sb.addEventListener('click', async (e)=>{
-    const id = e.target?.id;
-    if (!id) return;
-    if (id === 'closeDrawer') { State.drawerOpen=false; requestRender(); }
-    if (id === 'newChat') { await newChat(); State.drawerOpen=false; requestRender(); }
-    if (id === 'exportAll') { await exportAll(); State.drawerOpen=false; requestRender(); }
-    if (id === 'importAll') { await importAll(); State.drawerOpen=false; requestRender(); }
-    if (id === 'resetLocal') { await resetLocal(); State.drawerOpen=false; requestRender(); }
-    if (id === 'sendToBot') { await sendAllToBot(); State.drawerOpen=false; requestRender(); }
-  });
+  setTimeout(()=>{
+    $(`#${isDrawer?'sb':'ds'}_newchat`, sb)?.addEventListener("click", ()=>{
+      createChat();
+      go("chat/"+state.activeChatId);
+      if(isDrawer) closeDrawer();
+    });
+    $(`#${isDrawer?'sb':'ds'}_export`, sb)?.addEventListener("click", ()=>{ openExportModal(); if(isDrawer) closeDrawer(); });
+    $(`#${isDrawer?'sb':'ds'}_import`, sb)?.addEventListener("click", ()=>{ openImportModal(); if(isDrawer) closeDrawer(); });
+    $(`#${isDrawer?'sb':'ds'}_proj`, sb)?.addEventListener("click", ()=>{ openProjectPicker(); if(isDrawer) closeDrawer(); });
+  },0);
 
   return sb;
 }
 
-function renderBottomNav(){
-  const bn = el('div','bottom-nav');
-  const items = [
-    ['chat','Чат'],
-    ['projects','Проекты'],
-    ['media','Медиа'],
-    ['settings','Настройки'],
-  ];
-  items.forEach(([id,label])=>{
-    const b = el('button','btn' + (State.route===id?' primary':''));
+function bottomNav(){
+  const bn = el("div","bottom-nav");
+  const short = [["chat","Чат"],["projects","Проекты"],["media","Медиа"],["settings","Настройки"]];
+  short.forEach(([id,label])=>{
+    const b = el("button", state.route.name===id ? "active":"");
     b.textContent = label;
-    b.onclick = ()=> setRoute(id);
+    b.onclick = ()=>{ haptic("select"); go(id); };
     bn.appendChild(b);
   });
   return bn;
 }
 
-function renderView(){
-  if (protectedRoutes.has(State.route) && !isAuthed()) return renderNeedAuth();
-  if (State.route === 'chat') return renderChat();
-  if (State.route === 'projects') return renderProjects();
-  if (State.route === 'media') return renderMedia();
-  if (State.route === 'settings') return renderSettings();
-  if (State.route === 'diagnostics') return renderDiagnostics();
-  if (State.route === 'keys') return renderKeys();
-  if (State.route === 'reminders') return renderReminders();
-  if (State.route === 'calendar') return renderCalendar();
-  if (State.route === 'notifications') return renderNotifications();
-  return el('div');
+function topbar(){
+  const wrap = el("div","topbar");
+  const bar = el("div","bar");
+
+  const left = el("div","row");
+  const burger = el("button","btn icon");
+  burger.textContent = "☰";
+  burger.onclick = ()=>{ haptic("select"); openDrawer(); };
+  left.appendChild(burger);
+
+  const title = el("div","title");
+  title.textContent = topbarTitle();
+  left.appendChild(title);
+
+  const mid = el("div","row");
+  mid.style.flex="1";
+  mid.style.justifyContent="center";
+  const search = el("input","input");
+  search.placeholder = "Поиск…";
+  search.value = state.searchQuery || "";
+  search.style.maxWidth="420px";
+  search.oninput = (e)=> { state.searchQuery = e.target.value; render(); };
+  mid.appendChild(search);
+
+  const right = el("div","row");
+  right.appendChild(userMenuButton());
+
+  bar.appendChild(left);
+  bar.appendChild(mid);
+  bar.appendChild(right);
+
+  wrap.appendChild(bar);
+  return wrap;
 }
 
-function renderNeedAuth(){
-  const w = el('div','card section');
-  w.innerHTML = `
-    <div style="font-weight:800;font-size:16px;">Нужен доступ</div>
-    <div class="muted" style="margin-top:6px;">
-      Этот раздел требует авторизации через бэкенд. В Telegram обычно всё делается автоматически.
+/* ----------------------- Modals ----------------------- */
+function showModal(title, contentNode, {onClose=null} = {}){
+  const back = el("div","modal-back");
+  const modal = el("div","modal");
+  modal.innerHTML = `
+    <div class="row" style="justify-content:space-between">
+      <div class="h1">${esc(title)}</div>
+      <button class="btn icon" id="m_close">✕</button>
     </div>
     <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap;">
-      <button class="btn primary" id="tryTgAuth">Войти через Telegram</button>
-      <button class="btn" id="goSettings">Настройки</button>
-    </div>
   `;
-  w.addEventListener('click', async (e)=>{
-    if (e.target?.id === 'tryTgAuth') await telegramAuth();
-    if (e.target?.id === 'goSettings') setRoute('settings');
-  });
+  modal.appendChild(contentNode);
+  back.appendChild(modal);
+  document.body.appendChild(back);
+
+  const close = ()=>{
+    back.remove();
+    onClose && onClose();
+  };
+  $("#m_close", modal).onclick = close;
+  back.addEventListener("click",(e)=>{ if(e.target===back) close(); });
+  return {close, back, modal};
+}
+
+function openUserMenu(){
+  const c = el("div","col");
+
+  const row1 = el("div","row");
+  row1.style.justifyContent="space-between";
+  row1.innerHTML = `<div class="pill">${esc(tg? "TMA" : "Web")}</div><div class="pill">Model: ${esc(state.model)}</div>`;
+  c.appendChild(row1);
+
+  const modelSel = el("select","input");
+  modelSel.innerHTML = state.models.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join("");
+  modelSel.value = state.model;
+  modelSel.onchange = ()=>{ state.model = modelSel.value; persistAll(); toast("Модель сохранена"); render(); };
+  c.appendChild(labelWrap("Модель", modelSel));
+
+  const btns = el("div","row");
+  btns.style.flexWrap="wrap";
+  const b1 = el("button","btn"); b1.textContent="Экспорт данных";
+  b1.onclick = ()=>{ haptic("select"); openExportModal(); };
+  const b2 = el("button","btn"); b2.textContent="Импорт данных";
+  b2.onclick = ()=>{ haptic("select"); openImportModal(); };
+  const b3 = el("button","btn danger"); b3.textContent="Сброс локальных данных";
+  b3.onclick = ()=>{ haptic("impact","medium"); resetLocalData(); };
+  btns.appendChild(b1); btns.appendChild(b2); btns.appendChild(b3);
+  c.appendChild(btns);
+
+  if(tg){
+    const b = el("button","btn primary");
+    b.textContent = "Отправить текущий чат в бота";
+    b.onclick = ()=>{ haptic("impact","light"); sendCurrentChatToBot(); };
+    c.appendChild(b);
+  }
+
+  showModal("Профиль", c);
+}
+
+function labelWrap(label, node){
+  const w = el("div","col");
+  const l = el("div","small muted");
+  l.textContent = label;
+  w.appendChild(l);
+  w.appendChild(node);
   return w;
 }
 
-// ---------- Chat ----------
-function renderChat(){
-  const wrap = el('div','card section');
+function openProjectPicker(){
+  const c = el("div","col");
+  const list = el("div","col");
+  list.style.gap="8px";
 
-  // header controls
-  const header = el('div','row');
-  header.style.justifyContent = 'space-between';
-  header.style.flexWrap = 'wrap';
+  state.projects.filter(p=>!p.archived).forEach(p=>{
+    const b = el("button","btn");
+    b.style.display="flex";
+    b.style.justifyContent="space-between";
+    b.innerHTML = `<span style="display:flex;gap:10px;align-items:center;min-width:0">
+      <span style="width:10px;height:10px;border-radius:999px;background:${esc(p.color||'#60a5fa')}"></span>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</span>
+    </span>
+    <span class="pill">${(state.chats[p.id]||[]).length} чатов</span>`;
+    b.onclick = ()=>{
+      state.activeProjectId = p.id;
+      ensureProject();
+      persistAll();
+      toast("Проект выбран");
+      go("chat/"+state.activeChatId);
+    };
+    list.appendChild(b);
+  });
 
-  const left = el('div','row');
+  const add = el("button","btn primary");
+  add.textContent = "Новый проект";
+  add.onclick = ()=> openCreateProjectModal();
+
+  c.appendChild(list);
+  c.appendChild(add);
+  showModal("Выбор проекта", c);
+}
+
+function openCreateProjectModal(){
+  const c = el("div","col");
+  const name = el("input","input"); name.placeholder="Название проекта";
+  const color = el("input","input"); color.type="color"; color.value="#60a5fa";
+  const tmpl = el("select","input");
+  tmpl.innerHTML = `
+    <option value="empty">Пустой</option>
+    <option value="data">Анализ данных</option>
+    <option value="text">Генерация текста</option>
+    <option value="image">Работа с изображениями</option>
+  `;
+  const create = el("button","btn primary");
+  create.textContent="Создать";
+  create.onclick = ()=>{
+    const p = {id:uid(), name:(name.value.trim()||"Новый проект"), color:color.value, archived:false, created_at:Date.now(), template:tmpl.value};
+    state.projects.unshift(p);
+    state.activeProjectId = p.id;
+    state.chats[p.id] = [seedChatForTemplate(tmpl.value)];
+    state.activeChatId = state.chats[p.id][0].id;
+    persistAll();
+    toast("Проект создан");
+    go("chat/"+state.activeChatId);
+  };
+
+  c.appendChild(labelWrap("Название", name));
+  c.appendChild(labelWrap("Цвет", color));
+  c.appendChild(labelWrap("Шаблон", tmpl));
+  c.appendChild(create);
+
+  showModal("Новый проект", c);
+}
+
+function seedChatForTemplate(t){
+  const base = {id:uid(), title:"Новый чат", created_at:Date.now(), messages:[]};
+  const sys = (text)=> ({id:uid(), role:"system", text, created_at:Date.now(), attachments:[]});
+  if(t==="data"){
+    base.title="Анализ данных";
+    base.messages.push(sys("Ты помощник по анализу данных. Проси таблицы, CSV, формулы, делай выводы и отчёты."));
+  }else if(t==="text"){
+    base.title="Генерация текста";
+    base.messages.push(sys("Ты помощник по текстам: структуры, переписывание, тон, SEO, сценарии."));
+  }else if(t==="image"){
+    base.title="Изображения";
+    base.messages.push(sys("Ты помощник по изображениям: описания, идеи, промпты, обработка/анализ (если доступно)."));
+  }
+  return base;
+}
+
+function openExportModal(){
+  const c = el("div","col");
+  const hint = el("div","muted small");
+  hint.textContent = "Экспортирует проекты, чаты, настройки (локально).";
+  c.appendChild(hint);
+
+  const btn = el("button","btn primary");
+  btn.textContent="Скачать экспорт (.json)";
+  btn.onclick = ()=>{
+    const payload = {
+      version: "tma-1",
+      exported_at: new Date().toISOString(),
+      user: state.tgUser ? {id:state.tgUser.id, name:userLabel()} : null,
+      projects: state.projects,
+      activeProjectId: state.activeProjectId,
+      chats: state.chats,
+      activeChatId: state.activeChatId,
+      settings: state.settings,
+      model: state.model,
+      apiBase: state.apiBase,
+    };
+    downloadBlob(new Blob([JSON.stringify(payload,null,2)], {type:"application/json"}), "aiplatform-export.json");
+    toast("Экспорт скачан");
+  };
+  c.appendChild(btn);
+
+  showModal("Экспорт", c);
+}
+
+function openImportModal(){
+  const c = el("div","col");
+  const inp = el("input","input");
+  inp.type="file";
+  inp.accept="application/json,.json";
+  const btn = el("button","btn primary");
+  btn.textContent="Импортировать";
+  btn.disabled=true;
+
+  let file=null;
+  inp.onchange = ()=>{ file = inp.files?.[0]||null; btn.disabled=!file; };
+
+  btn.onclick = async ()=>{
+    try{
+      const txt = await file.text();
+      const data = JSON.parse(txt);
+      if(!data || !data.projects || !data.chats) throw new Error("Неверный формат экспорта");
+      state.projects = data.projects || [];
+      state.chats = data.chats || {};
+      state.activeProjectId = data.activeProjectId || state.projects[0]?.id || null;
+      state.activeChatId = data.activeChatId || (state.chats[state.activeProjectId]?.[0]?.id) || null;
+      state.settings = {...state.settings, ...(data.settings||{})};
+      state.model = data.model || state.model;
+      state.apiBase = data.apiBase || state.apiBase;
+      persistAll();
+      ensureProject();
+      toast("Импорт выполнен");
+      go("chat/"+state.activeChatId);
+    }catch(e){
+      toast("Ошибка импорта: "+e.message, false, 3500);
+    }
+  };
+
+  c.appendChild(inp);
+  c.appendChild(btn);
+  showModal("Импорт", c);
+}
+
+function resetLocalData(){
+  const keys = ["projects","activeProjectId","chats","activeChatId","settings","model","apiBase"];
+  keys.forEach(k=> LS.del(k));
+  location.reload();
+}
+
+/* ----------------------- Utilities ----------------------- */
+function downloadBlob(blob, filename){
+  const a=document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 50);
+}
+
+function copyText(text){
+  navigator.clipboard?.writeText(text).then(()=> toast("Скопировано")).catch(()=> toast("Не удалось скопировать", false));
+}
+
+/* ----------------------- Chat logic ----------------------- */
+function createChat(){
+  ensureProject();
+  const arr = state.chats[state.activeProjectId];
+  const c = {id:uid(), title:"Новый чат", created_at:Date.now(), messages:[]};
+  arr.unshift(c);
+  state.activeChatId = c.id;
+  persistAll();
+}
+
+function pushMessage(role, text, {attachments=[]} = {}){
+  const chat = currentChat();
+  if(!chat) return;
+  chat.messages.push({
+    id: uid(),
+    role,
+    text,
+    created_at: Date.now(),
+    attachments
+  });
+  persistAll();
+}
+
+function renderMarkdownBasic(text){
+  // minimal, safe-ish markdown (no HTML). headers, code blocks, inline code, bold/italic, links.
+  // Note: keep it simple for MVP.
+  let s = esc(text);
+  // code blocks ```
+  s = s.replace(/```([\s\S]*?)```/g, (m,code)=> `<pre style="white-space:pre-wrap;margin:10px 0;padding:10px;border:1px solid var(--line);border-radius:14px;background:rgba(0,0,0,.18)"><code>${code}</code></pre>`);
+  // inline code
+  s = s.replace(/`([^`]+)`/g, (m,c)=> `<code style="padding:2px 6px;border:1px solid var(--line);border-radius:10px;background:rgba(0,0,0,.12)">${c}</code>`);
+  // bold / italic
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  s = s.replace(/\*([^*]+)\*/g, "<i>$1</i>");
+  // links [text](url)
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`);
+  // line breaks
+  s = s.replace(/\n/g, "<br/>");
+  return s;
+}
+
+async function simulateAIResponse(promptText){
+  const chat = currentChat();
+  if(!chat) return;
+  const id = uid();
+  chat.messages.push({id, role:"ai", text:"", created_at:Date.now(), attachments:[]});
+  persistAll();
+  render(); // show bubble immediately
+
+  const full = `DEMO: я получил твоё сообщение:\n\n${promptText}\n\n— Можем подключить бэкенд для реального AI, стриминга, OCR, генерации изображений и т.д.`;
+  const streaming = state.settings.streaming !== false;
+
+  if(!streaming){
+    chat.messages.find(m=>m.id===id).text = full;
+    persistAll();
+    render();
+    return;
+  }
+
+  let i=0;
+  const step = ()=>{
+    i += clamp(Math.floor(Math.random()*8)+6, 6, 14);
+    chat.messages.find(m=>m.id===id).text = full.slice(0, i);
+    persistAll();
+    renderChatLogScrollToBottom();
+    if(i < full.length) setTimeout(step, state.settings.reduce_motion? 0 : 24);
+    else haptic("notify","success");
+  };
+  step();
+}
+
+async function tryBackendAI(promptText){
+  // If token exists and endpoint is available, use it; else fallback to demo.
+  // Keep it tolerant: if backend fails, show error then demo.
+  try{
+    if(!state.token) throw new Error("no-token");
+    const resp = await API.req("/ai/generate", {method:"POST", body:{
+      prompt: promptText,
+      provider: null,
+      model: state.model==="DEMO"? null : state.model,
+      temperature: 0.7,
+      max_tokens: 2000,
+      json_mode: false
+    }});
+    pushMessage("ai", resp?.response ?? "—");
+    haptic("notify","success");
+  }catch(e){
+    if(e.message!=="no-token"){
+      pushMessage("ai", "Ошибка API: "+e.message);
+      haptic("notify","error");
+    }
+    await simulateAIResponse(promptText);
+  }
+}
+
+function sendCurrentChatToBot(){
+  try{
+    const chat = currentChat();
+    if(!tg || !chat) return;
+    const payload = {
+      project: currentProject()?.name,
+      chat: chat.title,
+      messages: chat.messages.slice(-30) // last messages
+    };
+    tg.sendData(JSON.stringify(payload));
+    toast("Отправлено в бота");
+  }catch(e){
+    toast("Не удалось отправить: "+e.message, false);
+  }
+}
+
+/* ----------------------- Attachments & Media ----------------------- */
+function fileToAttachment(file){
+  return {
+    id: uid(),
+    name: file.name,
+    type: file.type || "application/octet-stream",
+    size: file.size,
+    lastModified: file.lastModified,
+    // We keep File object in memory only for the pending send; for saved messages we store "meta" only
+    _file: file,
+    // for previews we can create objectURL
+    _url: URL.createObjectURL(file)
+  };
+}
+
+function normalizeSavedAttachment(att){
+  // remove _file, keep url only if small enough & it's an image/video
+  const out = {...att};
+  delete out._file;
+  // do not persist object URLs (they are session-scoped)
+  delete out._url;
+  return out;
+}
+
+function collectAllMedia(){
+  const items = [];
+  Object.values(state.chats).forEach(arr=>{
+    (arr||[]).forEach(c=>{
+      (c.messages||[]).forEach(m=>{
+        (m.attachments||[]).forEach(a=>{
+          items.push({...a, _projectId: findProjectIdByChat(c.id), _chatId: c.id, _messageId: m.id});
+        });
+      });
+    });
+  });
+  return items;
+}
+
+function findProjectIdByChat(chatId){
+  for(const [pid, arr] of Object.entries(state.chats)){
+    if((arr||[]).some(c=>c.id===chatId)) return pid;
+  }
+  return null;
+}
+
+/* ----------------------- Views ----------------------- */
+function view(){
+  const r = state.route;
+  if(r.name==="chat") return chatView(r.params.id);
+  if(r.name==="projects") return projectsView();
+  if(r.name==="media") return mediaView();
+  if(r.name==="settings") return settingsView();
+  if(r.name==="diagnostics") return diagnosticsView();
+  if(r.name==="project") return projectDetailView(r.params.id);
+  return chatView();
+}
+
+function emptyState(title, desc, buttonText, onClick){
+  const w = el("div","card");
+  w.innerHTML = `<div class="h1">${esc(title)}</div><div class="muted" style="margin-top:6px">${esc(desc)}</div><div class="hr"></div>`;
+  const b = el("button","btn primary");
+  b.textContent = buttonText;
+  b.onclick = onClick;
+  w.appendChild(b);
+  return w;
+}
+
+function chatView(chatId=null){
+  ensureProject();
+  if(chatId){
+    const arr = state.chats[state.activeProjectId] || [];
+    if(arr.some(c=>c.id===chatId)){
+      state.activeChatId = chatId;
+      persistAll();
+    }
+  }
+
+  const chat = currentChat();
+  if(!chat){
+    return emptyState("Нет чата", "Создай новый чат, чтобы начать.", "Новый чат", ()=>{ createChat(); go("chat/"+state.activeChatId); });
+  }
+
+  const w = el("div","card");
   const proj = currentProject();
-  const projBtn = el('button','btn');
-  projBtn.textContent = proj ? `Проект: ${proj.name}` : 'Проект: —';
-  projBtn.onclick = ()=>{ State.modal = {type:'pickProject'}; requestRender(); };
-  left.appendChild(projBtn);
+  const header = el("div","row");
+  header.style.justifyContent="space-between";
+  header.innerHTML = `
+    <div style="min-width:0">
+      <div class="h2" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(chat.title)}</div>
+      <div class="muted small" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        ${esc(proj?.name || "—")}
+      </div>
+    </div>
+    <div class="row">
+      <button class="btn" id="chat_rename">Переименовать</button>
+      <button class="btn" id="chat_share">Поделиться</button>
+    </div>
+  `;
+  w.appendChild(header);
 
-  const right = el('div','row');
-  right.style.flexWrap='wrap';
-
-  const demo = el('button','btn' + (Settings.get('demoMode') ? ' primary':''));
-  demo.textContent = Settings.get('demoMode') ? 'DEMO' : 'LIVE';
-  demo.title = 'DEMO: без бэкенда, быстрый ответ; LIVE: попытка вызвать API (если настроено)';
-  demo.onclick = ()=>{ Settings.set('demoMode', !Settings.get('demoMode')); requestRender(); };
-
-  const searchBtn = el('button','btn');
-  searchBtn.textContent = 'Поиск';
-  searchBtn.onclick = ()=>{ State.modal = {type:'searchChat'}; requestRender(); };
-
-  const shareBtn = el('button','btn');
-  shareBtn.textContent = 'Поделиться';
-  shareBtn.onclick = ()=> shareLast();
-
-  right.appendChild(demo);
-  right.appendChild(searchBtn);
-  right.appendChild(shareBtn);
-
-  header.appendChild(left);
-  header.appendChild(right);
-
-  const chat = el('div','chat');
-
-  const msgs = el('div','msgs');
-  msgs.id = 'msgs';
-  chat.appendChild(msgs);
-
-  const attachRow = el('div','attach-row');
-  attachRow.id = 'attachRow';
-  chat.appendChild(attachRow);
-
-  const composer = el('div','composer');
-
-  const attachBtn = el('button','btn');
-  attachBtn.textContent = '📎';
-  attachBtn.title = 'Прикрепить файлы';
-  attachBtn.onclick = ()=> $('#filePicker')?.click();
-
-  const ta = el('textarea','textarea');
-  ta.id = 'msgText';
-  ta.placeholder = 'Сообщение…';
-  ta.value = State.draft.text || '';
-  ta.oninput = ()=>{
-    State.draft.text = ta.value;
-    persistDraft();
-    if (tg) requestRender(); // update MainButton enable state
-  };
-  ta.onkeydown = (e)=>{
-    // Enter = send, Shift+Enter = newline
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage();
-    }
-  };
-
-  const sendBtn = el('button','btn primary');
-  sendBtn.textContent = 'Отправить';
-  sendBtn.onclick = ()=> sendMessage();
-
-  composer.appendChild(attachBtn);
-  composer.appendChild(ta);
-  composer.appendChild(sendBtn);
-
-  // hidden file input
-  const file = el('input');
-  file.type='file';
-  file.id='filePicker';
-  file.multiple = true;
-  file.accept = '*/*';
-  file.style.display='none';
-  file.onchange = async ()=>{
-    const files = Array.from(file.files || []);
-    await addAttachments(files);
-    file.value='';
-    requestRender();
-  };
-
-  wrap.appendChild(header);
-  wrap.appendChild(el('div','hr'));
-  wrap.appendChild(chat);
-  wrap.appendChild(composer);
-  wrap.appendChild(file);
-
-  // drag & drop
-  wrap.ondragover = (e)=>{ e.preventDefault(); };
-  wrap.ondrop = async (e)=>{
-    e.preventDefault();
-    const files = Array.from(e.dataTransfer?.files || []);
-    if (files.length) {
-      await addAttachments(files);
-      requestRender();
-      TG.haptic('impact','light');
-    }
-  };
+  const chatlog = el("div","chatlog");
+  chatlog.id="chatlog";
+  w.appendChild(el("div","hr"));
 
   // render messages
-  renderMessages(msgs);
-  renderAttachments(attachRow);
+  const messages = (chat.messages || []);
+  if(messages.length===0){
+    chatlog.appendChild(emptyState("Пустой чат", "Напиши сообщение или прикрепи файл. История сохраняется локально.", "Написать привет", ()=>{
+      state.composing="Привет! Помоги мне с проектом.";
+      render();
+      $("#prompt")?.focus();
+    }));
+  }else{
+    const q = (state.searchQuery||"").trim().toLowerCase();
+    messages.forEach(m=>{
+      if(q && !(m.text||"").toLowerCase().includes(q) && !m.attachments?.some(a=>a.name?.toLowerCase().includes(q))) return;
 
-  // scroll to bottom
-  requestAnimationFrame(()=>{
-    msgs.scrollTop = msgs.scrollHeight;
-  });
+      const bubble = el("div","msg "+(m.role==="user"?"user":"ai"));
+      const meta = el("div","meta");
+      meta.innerHTML = `<span class="tag">${esc(m.role.toUpperCase())}</span><span class="tag">${new Date(m.created_at).toLocaleString()}</span>`;
+      bubble.appendChild(meta);
 
-  return wrap;
-}
-
-function renderMessages(container){
-  container.innerHTML='';
-  const s = Settings.get('markdown');
-
-  State.chat.forEach(m=>{
-    const b = el('div','bubble ' + (m.role==='me'?'me':'ai'));
-
-    // header line
-    const head = el('div','muted small');
-    head.style.display='flex';
-    head.style.justifyContent='space-between';
-    head.style.gap='8px';
-    head.innerHTML = `<span>${m.role==='me' ? 'Вы' : 'AI'}</span><span>${new Date(m.ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>`;
-
-    const body = el('div');
-
-    if (s && m.role !== 'me') body.innerHTML = renderMarkdown(m.text || '');
-    else body.textContent = m.text || '';
-
-    b.appendChild(head);
-    b.appendChild(body);
-
-    // attachments preview
-    if (m.attachments?.length) {
-      const ar = el('div');
-      ar.style.marginTop='8px';
-      ar.style.display='flex';
-      ar.style.flexWrap='wrap';
-      ar.style.gap='8px';
-      m.attachments.forEach(a=>{
-        const chip = el('div','attachment');
-        chip.innerHTML = `<span class="muted small">${esc(a.name)}</span>`;
-        const open = el('button','btn');
-        open.style.height='32px';
-        open.textContent = 'Открыть';
-        open.onclick = ()=>{
-          if (a.dataUrl) window.open(a.dataUrl, '_blank');
-          else TG.popup('Файл', 'Нет локальных данных (слишком большой файл).');
-        };
-        chip.appendChild(open);
-        ar.appendChild(chip);
-      });
-      b.appendChild(ar);
-    }
-
-    // actions
-    const actions = el('div','row');
-    actions.style.marginTop='8px';
-    actions.style.flexWrap='wrap';
-    const copy = el('button','btn');
-    copy.style.height='32px';
-    copy.textContent = 'Копировать';
-    copy.onclick = async ()=>{
-      try { await navigator.clipboard.writeText(m.text || ''); TG.haptic('notify','success'); }
-      catch { TG.toastErr('Не удалось скопировать'); }
-    };
-    actions.appendChild(copy);
-
-    if (m.role === 'ai') {
-      const like = el('button','btn');
-      like.style.height='32px';
-      like.textContent = '👍';
-      like.onclick = ()=>{ TG.haptic('impact','light'); logEvent('like', {messageId:m.id}); };
-      const dislike = el('button','btn');
-      dislike.style.height='32px';
-      dislike.textContent = '👎';
-      dislike.onclick = ()=>{ TG.haptic('impact','light'); logEvent('dislike', {messageId:m.id}); };
-      actions.appendChild(like);
-      actions.appendChild(dislike);
-    }
-
-    b.appendChild(actions);
-
-    container.appendChild(b);
-  });
-
-  if (!State.chat.length) {
-    const empty = el('div','muted small');
-    empty.style.padding='12px';
-    empty.textContent = 'Начните диалог. Можно прикреплять файлы (drag&drop или 📎).';
-    container.appendChild(empty);
-  }
-}
-
-function renderAttachments(container){
-  container.innerHTML='';
-  const items = State.draft.attachments || [];
-  items.forEach((a, idx)=>{
-    const chip = el('div','attachment');
-    const label = el('span','muted small');
-    label.textContent = a.name;
-    const open = el('button','btn');
-    open.style.height='32px';
-    open.textContent = a.type?.startsWith('image/') ? 'Ред.' : 'Открыть';
-    open.onclick = ()=>{
-      if (a.type?.startsWith('image/') && a.dataUrl) {
-        State.media.image.src = a.dataUrl;
-        State.media.image.rotate = 0;
-        State.media.image.filters = {brightness:1, contrast:1, saturate:1};
-        State.modal = {type:'imageEditor', fromDraftIndex: idx};
-        requestRender();
-        return;
+      const body = el("div","");
+      if(state.settings.markdown && m.role!=="user" && m.role!=="system"){
+        body.innerHTML = renderMarkdownBasic(m.text||"");
+      }else{
+        body.textContent = m.text || "";
       }
-      if (a.dataUrl) window.open(a.dataUrl, '_blank');
-      else TG.popup('Файл', 'Нет локальных данных (слишком большой файл).');
-    };
-    const x = el('span','x');
-    x.textContent = '✕';
-    x.onclick = ()=>{
-      State.draft.attachments.splice(idx,1);
-      persistDraft();
-      requestRender();
-    };
-    chip.appendChild(label);
-    chip.appendChild(open);
-    chip.appendChild(x);
-    container.appendChild(chip);
-  });
-}
+      bubble.appendChild(body);
 
-async function addAttachments(files){
-  const maxMB = clamp(Number(Settings.get('attachmentMaxMB')||8), 1, 50);
-  const maxBytes = maxMB * 1024 * 1024;
-
-  State.draft.attachments = State.draft.attachments || [];
-
-  for (const f of files) {
-    const att = { name: f.name, type: f.type || 'application/octet-stream', size: f.size, dataUrl: null };
-
-    // store small files as dataUrl for preview/edit; large files keep metadata only
-    if (f.size <= maxBytes) {
-      try {
-        att.dataUrl = await fileToDataUrl(f);
-      } catch {
-        att.dataUrl = null;
+      if(m.attachments?.length){
+        const ar = el("div","attach-row");
+        m.attachments.forEach(a=>{
+          const it = el("div","attach");
+          it.innerHTML = `<div style="display:flex;flex-direction:column;min-width:0">
+            <div class="name" title="${esc(a.name)}">${esc(a.name)}</div>
+            <div class="muted small">${esc(a.type||"file")} · ${formatBytes(a.size||0)}</div>
+          </div>
+          <button class="btn" data-open="${esc(a.id)}">Открыть</button>`;
+          ar.appendChild(it);
+        });
+        bubble.appendChild(ar);
       }
-    }
 
-    State.draft.attachments.push(att);
-  }
+      if(m.role==="ai" && (m.text||"").trim()){
+        const actions = el("div","actions");
+        const b1 = el("button","btn"); b1.textContent="Копировать";
+        b1.onclick = ()=> copyText(m.text||"");
+        const b2 = el("button","btn"); b2.textContent="👍";
+        b2.onclick = ()=> { toast("Спасибо!"); haptic("select"); };
+        const b3 = el("button","btn"); b3.textContent="👎";
+        b3.onclick = ()=> { toast("Принято"); haptic("select"); };
+        actions.appendChild(b1); actions.appendChild(b2); actions.appendChild(b3);
+        bubble.appendChild(actions);
+      }
 
-  persistDraft();
-}
-
-function fileToDataUrl(file){
-  return new Promise((resolve,reject)=>{
-    const r = new FileReader();
-    r.onload = ()=> resolve(String(r.result||''));
-    r.onerror = ()=> reject(new Error('read failed'));
-    r.readAsDataURL(file);
-  });
-}
-
-async function sendMessage(){
-  const text = ($('#msgText')?.value || '').trim();
-  const atts = (State.draft.attachments || []).slice();
-
-  if (!text && !atts.length) {
-    TG.haptic('notify','warning');
-    return;
-  }
-
-  const meMsg = {
-    id: crypto.randomUUID(),
-    role: 'me',
-    text,
-    ts: Date.now(),
-    attachments: atts
-  };
-  State.chat.push(meMsg);
-  persistChat();
-
-  // clear draft
-  State.draft.text='';
-  State.draft.attachments=[];
-  persistDraft();
-
-  requestRender();
-
-  // associate with active project
-  attachMessageToProject(meMsg);
-
-  // response
-  await respondToMessage(meMsg);
-}
-
-async function respondToMessage(meMsg){
-  const aiMsg = {
-    id: crypto.randomUUID(),
-    role:'ai',
-    text: '…',
-    ts: Date.now(),
-    attachments: []
-  };
-  State.chat.push(aiMsg);
-  persistChat();
-  requestRender();
-
-  const useDemo = Settings.get('demoMode') || !isAuthed();
-
-  try {
-    if (useDemo) {
-      aiMsg.text = await demoAnswer(meMsg);
-    } else {
-      // Attempt: /chat endpoint (user can adapt backend). Fallback to demo.
-      const payload = {
-        messages: lastMessagesForContext(30),
-        attachments: (meMsg.attachments||[]).map(a=>({name:a.name,type:a.type,size:a.size,dataUrl:a.dataUrl}))
-      };
-      const res = await API.req('/chat', {method:'POST', body: payload});
-      aiMsg.text = res?.text || res?.message || res?.answer || JSON.stringify(res);
-    }
-    aiMsg.ts = Date.now();
-    persistChat();
-    requestRender();
-    TG.haptic('notify','success');
-
-    attachMessageToProject(aiMsg);
-  } catch (e) {
-    aiMsg.text = `Ошибка: ${e.message || e}`;
-    aiMsg.ts = Date.now();
-    persistChat();
-    requestRender();
-    TG.haptic('notify','error');
-  }
-}
-
-function lastMessagesForContext(n){
-  const slice = State.chat.slice(-n);
-  return slice.map(m=>({role: m.role==='me'?'user':'assistant', content: m.text || ''}));
-}
-
-async function demoAnswer(meMsg){
-  // A useful deterministic demo: summarise + file awareness
-  const hasFiles = (meMsg.attachments||[]).length;
-  const parts = [];
-  parts.push('DEMO-ответ (без бэкенда).');
-
-  if (hasFiles) {
-    const imgs = meMsg.attachments.filter(a=>a.type?.startsWith('image/')).length;
-    const vids = meMsg.attachments.filter(a=>a.type?.startsWith('video/')).length;
-    const other = hasFiles - imgs - vids;
-    parts.push(`Вложения: ${hasFiles} (изображения: ${imgs}, видео: ${vids}, другое: ${other}).`);
-  }
-
-  const t = (meMsg.text||'').trim();
-  if (t) {
-    // pseudo “assistant”: short actionable bullets
-    const lines = t.split(/\n+/).map(s=>s.trim()).filter(Boolean);
-    const top = lines.slice(0,4);
-    parts.push('Я вижу запрос:');
-    parts.push(top.map((l,i)=>`${i+1}. ${l}`).join('\n'));
-    parts.push('Что могу сделать дальше в DEMO:');
-    parts.push('- сохранить в проект\n- экспортировать историю\n- отредактировать изображение/видео в разделе “Медиа”');
-  } else {
-    parts.push('Напиши сообщение, и я отвечу.');
-  }
-
-  // typewriter effect (optional)
-  const full = parts.join('\n\n');
-  if (!Settings.get('typewriter')) return full;
-
-  let out='';
-  for (const ch of full) {
-    out += ch;
-    // update last ai message live
-    const last = State.chat[State.chat.length-1];
-    if (last?.role === 'ai') {
-      last.text = out;
-      persistChat();
-      requestRender();
-    }
-    await sleep(8);
-  }
-  return out;
-}
-
-function shareLast(){
-  const last = [...State.chat].reverse().find(m=>m.role==='ai');
-  if (!last) return TG.toastErr('Нет ответа для шаринга');
-
-  // Telegram: open share popup by sending data to bot OR open link.
-  // We use sendData with a small payload.
-  TG.sendData({ type:'share', text: last.text, ts: last.ts });
-  TG.toastOK('Отправлено в бота через tg.sendData (если бот настроен).');
-}
-
-// Minimal markdown renderer (safe-ish): code blocks + inline code + links + bold/italic
-function renderMarkdown(text){
-  const safe = esc(text);
-  // code blocks ```
-  let out = safe.replace(/```([\s\S]*?)```/g, (m, code)=>{
-    return `<pre><code>${code}</code></pre>`;
-  });
-  // inline code
-  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // bold **x**
-  out = out.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
-  // italic *x*
-  out = out.replace(/\*([^*]+)\*/g, '<i>$1</i>');
-  // links
-  out = out.replace(/(https?:\/\/[\w\-._~:/?#[\]@!$&'()*+,;=%]+)/g, '<a target="_blank" rel="noopener">$1</a>');
-  // newlines
-  out = out.replace(/\n/g, '<br/>');
-  return out;
-}
-
-// ---------- Projects ----------
-function currentProject(){
-  return State.projects.find(p=>p.id===State.activeProjectId) || null;
-}
-
-async function newChat(){
-  const ok = State.chat.length ? await TG.confirm('Новый чат', 'Очистить текущий диалог?') : true;
-  if (!ok) return;
-  State.chat = [];
-  persistChat();
-  requestRender();
-}
-
-function renderProjects(){
-  const wrap = el('div','card section');
-
-  const head = el('div','row');
-  head.style.justifyContent='space-between';
-  head.style.flexWrap='wrap';
-
-  const left = el('div');
-  left.innerHTML = `<div style="font-weight:800;">Проекты</div><div class="muted small">Локально (в гостевом режиме) или синхронизация через бэкенд</div>`;
-
-  const right = el('div','row');
-  right.style.flexWrap='wrap';
-  const add = el('button','btn primary'); add.textContent='Создать'; add.onclick=()=>{ State.modal={type:'editProject', id:null}; requestRender(); };
-  const exp = el('button','btn'); exp.textContent='Экспорт'; exp.onclick=()=> exportProjects();
-  right.appendChild(add); right.appendChild(exp);
-
-  head.appendChild(left); head.appendChild(right);
-
-  const tools = el('div','row');
-  tools.style.flexWrap='wrap';
-  tools.style.marginTop='10px';
-  tools.innerHTML = `
-    <input id="projSearch" class="textarea" style="min-height:44px;max-height:44px;" placeholder="Поиск проектов…" />
-    <select id="projSort" class="btn" style="height:44px;">
-      <option value="updated">По дате</option>
-      <option value="name">По имени</option>
-    </select>
-  `;
-
-  const list = el('div');
-  list.style.marginTop='10px';
-
-  wrap.appendChild(head);
-  wrap.appendChild(el('div','hr'));
-  wrap.appendChild(tools);
-  wrap.appendChild(list);
-
-  const renderList = ()=>{
-    const q = ($('#projSearch', wrap)?.value || '').trim().toLowerCase();
-    const sort = $('#projSort', wrap)?.value || 'updated';
-
-    let items = [...State.projects];
-    if (q) items = items.filter(p=> (p.name||'').toLowerCase().includes(q) || (p.desc||'').toLowerCase().includes(q) || (p.tags||[]).join(' ').toLowerCase().includes(q));
-
-    if (sort === 'name') items.sort((a,b)=> String(a.name||'').localeCompare(String(b.name||'')));
-    else items.sort((a,b)=> (b.updatedAt||0)-(a.updatedAt||0));
-
-    list.innerHTML='';
-    if (!items.length) {
-      const empty = el('div','muted small');
-      empty.textContent = 'Проектов нет. Нажми “Создать”.';
-      list.appendChild(empty);
-      return;
-    }
-
-    items.forEach(p=>{
-      const card = el('div','card section');
-      card.style.marginBottom='10px';
-      const active = p.id === State.activeProjectId;
-      card.innerHTML = `
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
-          <div style="min-width:0;">
-            <div style="font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(p.name||'Без названия')}</div>
-            <div class="muted small" style="margin-top:4px;">${esc(p.desc||'')}</div>
-            <div class="muted small" style="margin-top:6px;">${(p.tags||[]).map(t=>`#${esc(t)}`).join(' ')}</div>
-          </div>
-          <div class="row" style="flex-wrap:wrap;justify-content:flex-end;">
-            <button class="btn ${active?'primary':''}" data-act="use" data-id="${p.id}">${active?'Выбран':'Выбрать'}</button>
-            <button class="btn" data-act="open" data-id="${p.id}">Открыть</button>
-          </div>
-        </div>
-      `;
-      list.appendChild(card);
+      chatlog.appendChild(bubble);
     });
+  }
+
+  w.appendChild(chatlog);
+
+  // attachments composer
+  const dz = el("div","dropzone");
+  dz.id="dropzone";
+  dz.innerHTML = `Перетащи файлы сюда или нажми «📎». Поддержка: изображения, видео, PDF, txt/csv.`;
+  w.appendChild(el("div","hr"));
+  w.appendChild(dz);
+
+  const attRow = el("div","attach-row");
+  attRow.id="pendingAtt";
+  w.appendChild(attRow);
+
+  const ta = el("textarea","input");
+  ta.id="prompt";
+  ta.rows = state.settings.compact ? 2 : 3;
+  ta.placeholder = "Сообщение…";
+  ta.value = state.composing || "";
+  w.appendChild(el("div","hr"));
+  w.appendChild(ta);
+
+  const controls = el("div","row");
+  controls.style.flexWrap="wrap";
+
+  const fileBtn = el("button","btn icon");
+  fileBtn.textContent="📎";
+  fileBtn.title="Прикрепить файл";
+  fileBtn.onclick = ()=> $("#filePick")?.click();
+
+  const micBtn = el("button","btn icon");
+  micBtn.textContent="🎙";
+  micBtn.title="Голосовой ввод";
+  micBtn.onclick = ()=> startVoiceInput(ta);
+
+  const sendBtn = el("button","btn primary");
+  sendBtn.id="sendBtn";
+  sendBtn.textContent="Отправить";
+
+  const clearBtn = el("button","btn");
+  clearBtn.textContent="Очистить чат";
+  clearBtn.onclick = ()=>{
+    if(!confirm("Очистить сообщения в этом чате?")) return;
+    chat.messages = [];
+    persistAll();
+    toast("Чат очищен");
+    haptic("notify","success");
+    render();
   };
 
-  renderList();
+  const toolsBtn = el("button","btn");
+  toolsBtn.textContent="Инструменты";
+  toolsBtn.onclick = ()=> openChatToolsModal();
 
-  wrap.addEventListener('input', (e)=>{
-    if (e.target?.id === 'projSearch') renderList();
-  });
-  wrap.addEventListener('change', (e)=>{
-    if (e.target?.id === 'projSort') renderList();
-  });
-  wrap.addEventListener('click', (e)=>{
-    const btn = e.target?.closest('button');
-    if (!btn) return;
-    const act = btn.dataset.act;
-    const id = btn.dataset.id;
-    if (!act || !id) return;
+  controls.appendChild(fileBtn);
+  controls.appendChild(micBtn);
+  controls.appendChild(sendBtn);
+  controls.appendChild(clearBtn);
+  controls.appendChild(toolsBtn);
 
-    if (act === 'use') {
-      State.activeProjectId = id;
-      persistProjects();
-      TG.haptic('impact','light');
-      renderList();
-    }
-    if (act === 'open') {
-      State.modal = {type:'projectDetails', id};
-      requestRender();
-    }
-  });
+  const filePick = el("input","input");
+  filePick.id="filePick";
+  filePick.type="file";
+  filePick.multiple = true;
+  filePick.accept = "image/*,video/*,application/pdf,text/plain,text/csv";
+  filePick.classList.add("hidden");
 
-  return wrap;
-}
+  w.appendChild(controls);
+  w.appendChild(filePick);
 
-function upsertProject(p){
-  const idx = State.projects.findIndex(x=>x.id===p.id);
-  if (idx >= 0) State.projects[idx] = p;
-  else State.projects.unshift(p);
-  persistProjects();
-}
+  // events
+  setTimeout(()=>{
+    // focus
+    if(!state.settings.reduce_motion) ta.focus();
 
-function deleteProject(id){
-  State.projects = State.projects.filter(p=>p.id!==id);
-  if (State.activeProjectId === id) State.activeProjectId = null;
-  persistProjects();
-}
+    // render pending attachments
+    renderPendingAttachments();
 
-function attachMessageToProject(msg){
-  const p = currentProject();
-  if (!p) return;
-  p.updatedAt = Date.now();
-  p.chats = p.chats || [];
-  p.chats.push(msg.id);
-  upsertProject(p);
-}
+    // drag & drop
+    dz.addEventListener("dragover",(e)=>{ e.preventDefault(); dz.classList.add("drag"); });
+    dz.addEventListener("dragleave",()=> dz.classList.remove("drag"));
+    dz.addEventListener("drop",(e)=>{
+      e.preventDefault();
+      dz.classList.remove("drag");
+      const files = Array.from(e.dataTransfer.files||[]);
+      addAttachments(files);
+    });
 
-async function exportProjects(){
-  const payload = {
-    projects: State.projects,
-    activeProjectId: State.activeProjectId,
-    exportedAt: new Date().toISOString()
-  };
-  downloadJson(payload, 'projects.json');
-  TG.toastOK('Проекты экспортированы');
-}
+    filePick.onchange = ()=> addAttachments(Array.from(filePick.files||[]));
 
-// ---------- Media ----------
-function renderMedia(){
-  const wrap = el('div','card section');
-  wrap.innerHTML = `
-    <div style="font-weight:800;">Медиа</div>
-    <div class="muted small" style="margin-top:6px;">Редактор фото (canvas) и базовые инструменты для видео (trim через ffmpeg.wasm)</div>
-    <div class="hr"></div>
-  `;
+    ta.oninput = ()=>{
+      state.composing = ta.value;
+      persistAll();
+      syncTgButtons();
+    };
 
-  const grid = el('div','grid');
-
-  // Image editor card
-  const imgCard = el('div','card section');
-  imgCard.innerHTML = `
-    <div style="font-weight:800;">🖼 Фото</div>
-    <div class="muted small" style="margin-top:6px;">Загрузка, фильтры, поворот, сохранение PNG, отправка в чат</div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap;">
-      <button class="btn primary" id="imgPick">Загрузить</button>
-      <button class="btn" id="imgPaste">Вставить</button>
-      <button class="btn" id="imgReset">Сброс</button>
-    </div>
-    <div style="margin-top:10px;" class="canvas-wrap">
-      <canvas id="imgCanvas" width="900" height="600"></canvas>
-    </div>
-    <div class="hr"></div>
-    <div class="grid" style="grid-template-columns:1fr 1fr;">
-      <div>
-        <div class="muted small">Яркость</div>
-        <input type="range" id="fBright" min="0" max="2" step="0.01" value="1" />
-      </div>
-      <div>
-        <div class="muted small">Контраст</div>
-        <input type="range" id="fContr" min="0" max="2" step="0.01" value="1" />
-      </div>
-      <div>
-        <div class="muted small">Насыщенность</div>
-        <input type="range" id="fSat" min="0" max="3" step="0.01" value="1" />
-      </div>
-      <div>
-        <div class="muted small">Поворот</div>
-        <input type="range" id="fRot" min="-180" max="180" step="1" value="0" />
-      </div>
-    </div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap;">
-      <button class="btn" id="imgDownload">Скачать PNG</button>
-      <button class="btn" id="imgToChat">В чат</button>
-    </div>
-    <input id="imgFile" type="file" accept="image/*" style="display:none" />
-  `;
-
-  const vidCard = el('div','card section');
-  vidCard.innerHTML = `
-    <div style="font-weight:800;">🎬 Видео</div>
-    <div class="muted small" style="margin-top:6px;">Trim (обрезка) — опционально через ffmpeg.wasm, работает полностью в браузере</div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap;">
-      <button class="btn primary" id="vidPick">Загрузить</button>
-      <button class="btn" id="vidLoad">Загрузить редактор</button>
-      <button class="btn" id="vidReset">Сброс</button>
-    </div>
-    <div style="margin-top:10px;">
-      <video id="vid" controls playsinline style="width:100%;border-radius:14px;border:1px solid var(--line);"></video>
-    </div>
-    <div class="hr"></div>
-    <div class="grid" style="grid-template-columns:1fr 1fr;">
-      <div>
-        <div class="muted small">Start (сек)</div>
-        <input type="number" id="vidStart" class="textarea" style="min-height:44px;max-height:44px;" value="0" min="0" step="0.1" />
-      </div>
-      <div>
-        <div class="muted small">End (сек)</div>
-        <input type="number" id="vidEnd" class="textarea" style="min-height:44px;max-height:44px;" value="0" min="0" step="0.1" />
-      </div>
-    </div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap;">
-      <button class="btn" id="vidSnapshot">Кадр → PNG</button>
-      <button class="btn primary" id="vidTrim">Trim</button>
-      <button class="btn" id="vidToChat">В чат</button>
-    </div>
-    <div class="muted small" id="vidStatus" style="margin-top:8px;"></div>
-    <input id="vidFile" type="file" accept="video/*" style="display:none" />
-  `;
-
-  grid.appendChild(imgCard);
-  grid.appendChild(vidCard);
-  wrap.appendChild(grid);
-
-  // bind image
-  const imgFile = $('#imgFile', imgCard);
-  $('#imgPick', imgCard).onclick = ()=> imgFile.click();
-  imgFile.onchange = async ()=>{
-    const f = imgFile.files?.[0];
-    if (!f) return;
-    const max = clamp(Number(Settings.get('attachmentMaxMB')||8),1,50)*1024*1024;
-    if (f.size > max) { TG.toastErr(`Слишком большой файл для inline-редактирования (лимит ${Settings.get('attachmentMaxMB')}MB).`); return; }
-    State.media.image.src = await fileToDataUrl(f);
-    State.media.image.rotate = 0;
-    State.media.image.filters = {brightness:1, contrast:1, saturate:1};
-    drawImageCanvas();
-    imgFile.value='';
-  };
-
-  $('#imgPaste', imgCard).onclick = async ()=>{
-    try {
-      const items = await navigator.clipboard.read();
-      for (const it of items) {
-        const types = it.types || [];
-        const imgType = types.find(t=>t.startsWith('image/'));
-        if (!imgType) continue;
-        const blob = await it.getType(imgType);
-        const file = new File([blob], `pasted.${imgType.split('/')[1]||'png'}`, {type: imgType});
-        const max = clamp(Number(Settings.get('attachmentMaxMB')||8),1,50)*1024*1024;
-        if (file.size > max) { TG.toastErr(`Слишком большой файл (лимит ${Settings.get('attachmentMaxMB')}MB).`); return; }
-        State.media.image.src = await fileToDataUrl(file);
-        State.media.image.rotate = 0;
-        State.media.image.filters = {brightness:1, contrast:1, saturate:1};
-        drawImageCanvas();
-        TG.haptic('notify','success');
-        return;
+    ta.addEventListener("keydown",(ev)=>{
+      if(state.settings.enter_to_send && ev.key==="Enter" && !ev.shiftKey){
+        ev.preventDefault();
+        doSend();
       }
-      TG.toastErr('В буфере нет изображения');
-    } catch {
-      TG.toastErr('Clipboard API недоступен');
-    }
-  };
+    });
 
-  $('#imgReset', imgCard).onclick = ()=>{
-    State.media.image.src = null;
-    State.media.image.rotate = 0;
-    State.media.image.filters = {brightness:1, contrast:1, saturate:1};
-    drawImageCanvas(true);
-  };
+    sendBtn.onclick = doSend;
 
-  const bindRange = (id, key, min, max)=>{
-    const r = $('#'+id, imgCard);
-    r.value = String(State.media.image[key] ?? (key==='rotate'?0:1));
-  };
+    $("#chat_rename", w).onclick = ()=>{
+      const t = prompt("Название чата:", chat.title);
+      if(!t) return;
+      chat.title = t.slice(0,80);
+      persistAll();
+      toast("Переименовано");
+      render();
+    };
 
-  $('#fBright', imgCard).oninput = (e)=>{ State.media.image.filters.brightness = Number(e.target.value); drawImageCanvas(); };
-  $('#fContr', imgCard).oninput = (e)=>{ State.media.image.filters.contrast = Number(e.target.value); drawImageCanvas(); };
-  $('#fSat', imgCard).oninput = (e)=>{ State.media.image.filters.saturate = Number(e.target.value); drawImageCanvas(); };
-  $('#fRot', imgCard).oninput = (e)=>{ State.media.image.rotate = Number(e.target.value); drawImageCanvas(); };
+    $("#chat_share", w).onclick = ()=>{
+      const text = (chat.messages||[]).slice(-10).map(m=>`${m.role}: ${m.text}`).join("\n\n");
+      if(tg?.openTelegramLink){
+        // open share link (fallback)
+        const url = "https://t.me/share/url?url="+encodeURIComponent("https://t.me")+"&text="+encodeURIComponent(text.slice(0,4000));
+        tg.openLink(url);
+      }else if(navigator.share){
+        navigator.share({text}).catch(()=>{});
+      }else{
+        copyText(text);
+      }
+      toast("Поделиться: готово");
+    };
 
-  $('#imgDownload', imgCard).onclick = ()=>{
-    const c = $('#imgCanvas', imgCard);
-    const url = c.toDataURL('image/png');
-    downloadDataUrl(url, 'image.png');
-  };
+  },0);
 
-  $('#imgToChat', imgCard).onclick = async ()=>{
-    const c = $('#imgCanvas', imgCard);
-    const url = c.toDataURL('image/png');
-    State.draft.attachments = State.draft.attachments || [];
-    State.draft.attachments.push({ name:'edited.png', type:'image/png', size: url.length, dataUrl: url });
-    persistDraft();
-    TG.toastOK('Добавлено в вложения чата');
-  };
+  function doSend(){
+    const text = (ta.value||"").trim();
+    const pending = state.attachments.slice();
+    if(!text && pending.length===0) return;
 
-  // image drag drop
-  imgCard.ondragover = (e)=> e.preventDefault();
-  imgCard.ondrop = async (e)=>{
-    e.preventDefault();
-    const f = e.dataTransfer?.files?.[0];
-    if (!f) return;
-    if (!String(f.type||'').startsWith('image/')) { TG.toastErr('Это не изображение'); return; }
-    const max = clamp(Number(Settings.get('attachmentMaxMB')||8),1,50)*1024*1024;
-    if (f.size > max) { TG.toastErr(`Слишком большой файл (лимит ${Settings.get('attachmentMaxMB')}MB).`); return; }
-    State.media.image.src = await fileToDataUrl(f);
-    State.media.image.rotate = 0;
-    State.media.image.filters = {brightness:1, contrast:1, saturate:1};
-    drawImageCanvas();
-  };
+    // save user msg
+    pushMessage("user", text || "(файлы)", {attachments: pending.map(normalizeSavedAttachment)});
+    state.attachments.forEach(a=>{ try{ URL.revokeObjectURL(a._url); }catch{} });
+    state.attachments = [];
+    state.composing = "";
+    ta.value="";
+    persistAll();
+    render();
+    haptic("impact","light");
 
-  // bind video
-  const vidFile = $('#vidFile', vidCard);
-  $('#vidPick', vidCard).onclick = ()=> vidFile.click();
-  vidFile.onchange = ()=>{
-    const f = vidFile.files?.[0];
-    if (!f) return;
-    loadVideoFile(f);
-    vidFile.value='';
-  };
-
-  $('#vidReset', vidCard).onclick = ()=> resetVideo();
-  $('#vidLoad', vidCard).onclick = ()=> loadFFmpeg();
-
-  $('#vidStart', vidCard).oninput = ()=>{};
-  $('#vidEnd', vidCard).oninput = ()=>{};
-
-  $('#vidSnapshot', vidCard).onclick = ()=> snapshotVideo();
-  $('#vidTrim', vidCard).onclick = ()=> trimVideo();
-  $('#vidToChat', vidCard).onclick = ()=> videoToChat();
-
-  vidCard.ondragover = (e)=> e.preventDefault();
-  vidCard.ondrop = (e)=>{
-    e.preventDefault();
-    const f = e.dataTransfer?.files?.[0];
-    if (!f) return;
-    if (!String(f.type||'').startsWith('video/')) { TG.toastErr('Это не видео'); return; }
-    loadVideoFile(f);
-  };
-
-  drawImageCanvas(true);
-  syncVideoUI();
-
-  return wrap;
-}
-
-function drawImageCanvas(clear=false){
-  const c = $('#imgCanvas');
-  if (!c) return;
-  const ctx = c.getContext('2d');
-  ctx.save();
-  ctx.clearRect(0,0,c.width,c.height);
-
-  // background
-  ctx.fillStyle = 'rgba(0,0,0,0)';
-  ctx.fillRect(0,0,c.width,c.height);
-
-  if (clear || !State.media.image.src) {
-    ctx.fillStyle = 'rgba(255,255,255,0.06)';
-    ctx.fillRect(0,0,c.width,c.height);
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.font = '14px ui-sans-serif';
-    ctx.fillText('Перетащи изображение сюда или нажми “Загрузить”', 18, 30);
-    ctx.restore();
-    return;
+    // response
+    if(state.model==="DEMO") simulateAIResponse(text || "Файлы прикреплены");
+    else tryBackendAI(text || "Файлы прикреплены");
   }
 
-  const img = new Image();
-  img.onload = ()=>{
-    const {brightness, contrast, saturate} = State.media.image.filters;
-    const rot = (State.media.image.rotate || 0) * Math.PI/180;
-
-    ctx.clearRect(0,0,c.width,c.height);
-
-    // fit image
-    const scale = Math.min(c.width / img.width, c.height / img.height);
-    const w = img.width * scale;
-    const h = img.height * scale;
-
-    ctx.filter = `brightness(${brightness}) contrast(${contrast}) saturate(${saturate})`;
-
-    // rotate around center
-    ctx.translate(c.width/2, c.height/2);
-    ctx.rotate(rot);
-    ctx.drawImage(img, -w/2, -h/2, w, h);
-
-    ctx.restore();
-    ctx.filter = 'none';
-
-    // sync sliders
-    const b = $('#fBright'); if (b) b.value = String(brightness);
-    const k = $('#fContr'); if (k) k.value = String(contrast);
-    const s = $('#fSat'); if (s) s.value = String(saturate);
-    const r = $('#fRot'); if (r) r.value = String(State.media.image.rotate || 0);
-
-  };
-  img.src = State.media.image.src;
+  return w;
 }
 
-function loadVideoFile(file){
-  resetVideo();
-  State.media.video.file = file;
-  State.media.video.url = URL.createObjectURL(file);
-
-  const v = $('#vid');
-  v.src = State.media.video.url;
-  v.onloadedmetadata = ()=>{
-    State.media.video.start = 0;
-    State.media.video.end = Number(v.duration || 0);
-    syncVideoUI();
-  };
-
-  syncVideoUI();
-}
-
-function resetVideo(){
-  const v = State.media.video;
-  if (v.url) {
-    try { URL.revokeObjectURL(v.url); } catch {}
-  }
-  State.media.video = { file:null, url:null, start:0, end:0, working:false, ffmpegReady: v.ffmpegReady || false };
-  syncVideoUI();
-  const vid = $('#vid');
-  if (vid) { vid.removeAttribute('src'); vid.load(); }
-}
-
-function syncVideoUI(){
-  const s = $('#vidStart');
-  const e = $('#vidEnd');
-  const st = $('#vidStatus');
-  const trim = $('#vidTrim');
-  const toChat = $('#vidToChat');
-
-  if (s) s.value = String(State.media.video.start || 0);
-  if (e) e.value = String(State.media.video.end || 0);
-
-  if (st) {
-    const ready = State.media.video.ffmpegReady ? 'редактор загружен' : 'редактор не загружен';
-    const file = State.media.video.file ? `${State.media.video.file.name} (${Math.round(State.media.video.file.size/1024/1024*10)/10}MB)` : 'файл не выбран';
-    st.textContent = `${file} • ${ready}${State.media.video.working ? ' • обработка…' : ''}`;
-  }
-
-  if (trim) trim.disabled = !State.media.video.file || State.media.video.working;
-  if (toChat) toChat.disabled = !State.media.video.file;
-}
-
-function snapshotVideo(){
-  const vid = $('#vid');
-  if (!vid || !State.media.video.file) return TG.toastErr('Видео не выбрано');
-  const c = document.createElement('canvas');
-  c.width = vid.videoWidth || 640;
-  c.height = vid.videoHeight || 360;
-  const ctx = c.getContext('2d');
-  ctx.drawImage(vid, 0,0,c.width,c.height);
-  const url = c.toDataURL('image/png');
-  downloadDataUrl(url, 'frame.png');
-  TG.toastOK('Кадр сохранён');
-}
-
-async function videoToChat(){
-  const f = State.media.video.file;
-  if (!f) return;
-  const max = clamp(Number(Settings.get('attachmentMaxMB')||8),1,50)*1024*1024;
-  let dataUrl = null;
-  if (f.size <= max) {
-    try { dataUrl = await fileToDataUrl(f); } catch { dataUrl = null; }
-  }
-  State.draft.attachments = State.draft.attachments || [];
-  State.draft.attachments.push({ name: f.name, type: f.type || 'video/mp4', size: f.size, dataUrl });
-  persistDraft();
-  TG.toastOK('Видео добавлено в вложения чата');
-}
-
-// ffmpeg.wasm (optional). We load from CDN at runtime.
-let FF = null;
-async function loadFFmpeg(){
-  if (State.media.video.ffmpegReady) return TG.toastOK('Редактор уже загружен');
-  try {
-    const status = $('#vidStatus');
-    if (status) status.textContent = 'Загрузка ffmpeg.wasm…';
-
-    // load script
-    await loadScriptOnce('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js', 'ffmpeg-umd');
-    const { FFmpeg } = window.FFmpegWASM || window;
-
-    if (!window.FFmpeg || !window.FFmpeg.createFFmpeg) {
-      // older UMD exposes createFFmpeg
-    }
-
-    // create instance
-    if (window.FFmpeg?.createFFmpeg) {
-      FF = window.FFmpeg.createFFmpeg({ log: false, corePath: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js' });
-      await FF.load();
-    } else if (window.FFmpegWASM?.createFFmpeg) {
-      FF = window.FFmpegWASM.createFFmpeg({ log: false, corePath: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js' });
-      await FF.load();
-    } else {
-      throw new Error('FFmpeg API not found');
-    }
-
-    State.media.video.ffmpegReady = true;
-    syncVideoUI();
-    TG.toastOK('Видео-редактор загружен');
-  } catch (e) {
-    TG.toastErr(`Не удалось загрузить ffmpeg.wasm: ${e.message || e}`);
-  }
-}
-
-function loadScriptOnce(src, id){
-  return new Promise((resolve,reject)=>{
-    if (id && document.getElementById(id)) return resolve(true);
-    const s = document.createElement('script');
-    if (id) s.id = id;
-    s.src = src;
-    s.async = true;
-    s.onload = ()=> resolve(true);
-    s.onerror = ()=> reject(new Error('script load failed'));
-    document.head.appendChild(s);
+function renderPendingAttachments(){
+  const cont = $("#pendingAtt");
+  if(!cont) return;
+  cont.innerHTML = "";
+  state.attachments.forEach(a=>{
+    const it = el("div","attach");
+    it.innerHTML = `<div style="display:flex;flex-direction:column;min-width:0">
+      <div class="name" title="${esc(a.name)}">${esc(a.name)}</div>
+      <div class="muted small">${esc(a.type||"file")} · ${formatBytes(a.size||0)}</div>
+    </div>
+    <button class="btn danger" data-rm="${esc(a.id)}">Удалить</button>`;
+    cont.appendChild(it);
+  });
+  $$("button[data-rm]", cont).forEach(b=>{
+    b.onclick = ()=>{
+      const id = b.getAttribute("data-rm");
+      const idx = state.attachments.findIndex(x=>x.id===id);
+      if(idx>=0){
+        try{ URL.revokeObjectURL(state.attachments[idx]._url); }catch{}
+        state.attachments.splice(idx,1);
+        renderPendingAttachments();
+        syncTgButtons();
+      }
+    };
   });
 }
 
-async function trimVideo(){
-  const f = State.media.video.file;
-  if (!f) return;
-  const start = Math.max(0, Number($('#vidStart')?.value || 0));
-  const end = Math.max(0, Number($('#vidEnd')?.value || 0));
-  if (end <= start) return TG.toastErr('End должен быть больше Start');
-
-  if (!State.media.video.ffmpegReady) {
-    const ok = await TG.confirm('Нужно загрузить редактор', 'Trim требует ffmpeg.wasm (загрузится с CDN). Загрузить сейчас?');
-    if (!ok) return;
-    await loadFFmpeg();
-  }
-  if (!FF) return;
-
-  try {
-    State.media.video.working = true;
-    syncVideoUI();
-
-    const inName = 'in.mp4';
-    const outName = 'out.mp4';
-
-    const buf = new Uint8Array(await f.arrayBuffer());
-    FF.FS('writeFile', inName, buf);
-
-    // fast trim: -ss before -i for speed, -t duration
-    const dur = Math.max(0.1, end - start);
-    await FF.run('-ss', String(start), '-i', inName, '-t', String(dur), '-c', 'copy', outName);
-
-    const out = FF.FS('readFile', outName);
-    const blob = new Blob([out.buffer], {type: 'video/mp4'});
-    const url = URL.createObjectURL(blob);
-
-    // offer download
-    downloadBlob(blob, 'trimmed.mp4');
-
-    // update current video preview
-    resetVideo();
-    const newFile = new File([blob], `trimmed_${f.name.replace(/\s+/g,'_')}`, {type: 'video/mp4'});
-    loadVideoFile(newFile);
-
-    // cleanup
-    try { FF.FS('unlink', inName); FF.FS('unlink', outName); } catch {}
-
-    TG.toastOK('Trim готов');
-  } catch (e) {
-    TG.toastErr(`Trim ошибка: ${e.message || e}`);
-  } finally {
-    State.media.video.working = false;
-    syncVideoUI();
-  }
-}
-
-// ---------- Settings View ----------
-function renderSettings(){
-  const wrap = el('div','card section');
-  wrap.innerHTML = `
-    <div style="font-weight:800;">Настройки</div>
-    <div class="muted small" style="margin-top:6px;">Локально + (опционально) Telegram CloudStorage</div>
-    <div class="hr"></div>
-  `;
-
-  const form = el('div');
-  form.innerHTML = `
-    <div class="grid">
-      <div class="card section">
-        <div style="font-weight:700;">Интерфейс</div>
-        <div class="hr"></div>
-        <label class="muted small">Тема</label>
-        <select id="setTheme" class="btn" style="width:100%;height:44px;">
-          <option value="auto">Авто (Telegram)</option>
-          <option value="light">Светлая</option>
-          <option value="dark">Тёмная</option>
-        </select>
-        <div style="height:10px"></div>
-        <label class="muted small">Размер шрифта</label>
-        <input id="setFont" type="range" min="0.85" max="1.35" step="0.01" />
-        <div class="hr"></div>
-        <div class="row" style="flex-wrap:wrap;">
-          <button class="btn" id="togCompact">Компактный</button>
-          <button class="btn" id="togMarkdown">Markdown</button>
-          <button class="btn" id="togType">Typewriter</button>
-          <button class="btn" id="togRM">Reduce motion</button>
-          <button class="btn" id="togH">Haptics</button>
-        </div>
-      </div>
-
-      <div class="card section">
-        <div style="font-weight:700;">Сеть / API</div>
-        <div class="hr"></div>
-        <label class="muted small">API base</label>
-        <input id="setApi" class="textarea" style="min-height:44px;max-height:44px;" placeholder="/api/v1 или https://domain/api/v1" />
-        <div style="height:10px"></div>
-        <label class="muted small">Макс. размер inline-вложений (MB)</label>
-        <input id="setMax" type="range" min="1" max="50" step="1" />
-        <div class="hr"></div>
-        <div class="row" style="flex-wrap:wrap;">
-          <button class="btn" id="btnPing">Ping API</button>
-          <button class="btn" id="btnAuth">TG auth</button>
-          <button class="btn danger" id="btnLogout">Logout</button>
-        </div>
-        <div class="muted small" id="pingOut" style="margin-top:8px"></div>
-      </div>
-
-      <div class="card section">
-        <div style="font-weight:700;">Данные</div>
-        <div class="hr"></div>
-        <div class="row" style="flex-wrap:wrap;">
-          <button class="btn" id="btnExport">Экспорт</button>
-          <button class="btn" id="btnImport">Импорт</button>
-          <button class="btn" id="btnCloudSave">Сохранить в Cloud</button>
-          <button class="btn" id="btnCloudLoad">Загрузить из Cloud</button>
-          <button class="btn danger" id="btnClear">Очистить всё</button>
-        </div>
-        <div class="muted small" style="margin-top:8px">CloudStorage доступен только внутри Telegram.</div>
-        <input id="importFile" type="file" accept="application/json" style="display:none" />
-      </div>
-
-      <div class="card section">
-        <div style="font-weight:700;">О приложении</div>
-        <div class="hr"></div>
-        <div class="muted small">Версия UI: <b>v2</b></div>
-        <div class="muted small" style="margin-top:8px">User: ${esc(TG.user ? `${TG.user.first_name||''} ${TG.user.last_name||''}`.trim() : 'guest')}</div>
-      </div>
-    </div>
-  `;
-
-  wrap.appendChild(form);
-
-  // init controls
-  $('#setTheme', wrap).value = Settings.get('theme');
-  $('#setFont', wrap).value = String(Settings.get('fontScale'));
-  $('#setApi', wrap).value = String(Settings.get('apiBase'));
-  $('#setMax', wrap).value = String(Settings.get('attachmentMaxMB'));
-
-  // toggle buttons reflect state
-  const reflect = ()=>{
-    setBtnState('#togCompact', Settings.get('compact'));
-    setBtnState('#togMarkdown', Settings.get('markdown'));
-    setBtnState('#togType', Settings.get('typewriter'));
-    setBtnState('#togRM', Settings.get('reduceMotion'));
-    setBtnState('#togH', Settings.get('haptics'));
-  };
-  reflect();
-
-  $('#setTheme', wrap).onchange = (e)=>{ Settings.set('theme', e.target.value); TG.applyTheme(); requestRender(); };
-  $('#setFont', wrap).oninput = (e)=>{ Settings.set('fontScale', Number(e.target.value)); };
-  $('#setApi', wrap).onchange = (e)=>{ Settings.set('apiBase', String(e.target.value||'').trim() || '/api/v1'); };
-  $('#setMax', wrap).oninput = (e)=>{ Settings.set('attachmentMaxMB', Number(e.target.value)); };
-
-  $('#togCompact', wrap).onclick = ()=>{ Settings.set('compact', !Settings.get('compact')); reflect(); };
-  $('#togMarkdown', wrap).onclick = ()=>{ Settings.set('markdown', !Settings.get('markdown')); reflect(); requestRender(); };
-  $('#togType', wrap).onclick = ()=>{ Settings.set('typewriter', !Settings.get('typewriter')); reflect(); };
-  $('#togRM', wrap).onclick = ()=>{ Settings.set('reduceMotion', !Settings.get('reduceMotion')); reflect(); };
-  $('#togH', wrap).onclick = ()=>{ Settings.set('haptics', !Settings.get('haptics')); reflect(); };
-
-  $('#btnPing', wrap).onclick = async ()=>{
-    const out = $('#pingOut', wrap);
-    out.textContent = '…';
-    try {
-      const ms = await API.ping();
-      out.textContent = `Ping: ${ms} ms`;
-    } catch (e) {
-      out.textContent = `Ошибка: ${e.message || e}`;
+function addAttachments(files){
+  if(!files?.length) return;
+  const maxInline = (state.settings.max_inline_mb || 4) * 1024 * 1024;
+  files.forEach(f=>{
+    // Keep any file as metadata; inline previews only for small media
+    const a = fileToAttachment(f);
+    if(f.size > maxInline){
+      // We still attach as meta, but warn
+      toast(`Файл ${f.name} слишком большой для inline-превью, прикреплён как метаданные`, true, 2600);
     }
-  };
+    state.attachments.push(a);
+  });
+  persistAll();
+  renderPendingAttachments();
+  haptic("select");
+  syncTgButtons();
+}
 
-  $('#btnAuth', wrap).onclick = ()=> telegramAuth();
-  $('#btnLogout', wrap).onclick = async ()=>{
-    if (!isAuthed()) return TG.toastErr('Токена нет');
-    const ok = await TG.confirm('Выход', 'Удалить токен из браузера?');
-    if (!ok) return;
-    API.clearToken();
-    TG.toastOK('Токен удалён');
-    requestRender();
-  };
+function projectsView(){
+  ensureProject();
+  const w = el("div","card");
 
-  $('#btnExport', wrap).onclick = ()=> exportAll();
+  const top = el("div","row");
+  top.style.justifyContent="space-between";
+  top.innerHTML = `<div><div class="h2">Проекты</div><div class="muted small">Локально (MVP). Позже подключим бэкенд.</div></div>`;
+  const add = el("button","btn primary");
+  add.textContent="+";
+  add.onclick = ()=> openCreateProjectModal();
+  top.appendChild(add);
+  w.appendChild(top);
 
-  const importFile = $('#importFile', wrap);
-  $('#btnImport', wrap).onclick = ()=> importFile.click();
-  importFile.onchange = async ()=>{
-    const f = importFile.files?.[0];
-    if (!f) return;
-    try {
-      const obj = JSON.parse(await f.text());
-      importAllObject(obj);
-      TG.toastOK('Импортировано');
-      requestRender();
-    } catch (e) {
-      TG.toastErr('Неверный JSON');
-    } finally {
-      importFile.value='';
+  w.appendChild(el("div","hr"));
+
+  const q = (state.searchQuery||"").trim().toLowerCase();
+  const list = el("div","col");
+
+  const items = state.projects.filter(p=>!p.archived).filter(p=> !q || p.name.toLowerCase().includes(q));
+  if(items.length===0){
+    w.appendChild(emptyState("Нет проектов", "Создай первый проект — в нём будут чаты, медиа и настройки.", "Создать проект", ()=> openCreateProjectModal()));
+    return w;
+  }
+
+  items.forEach(p=>{
+    const card = el("div","card");
+    card.innerHTML = `
+      <div class="row" style="justify-content:space-between">
+        <div style="min-width:0">
+          <div class="row" style="gap:8px">
+            <span style="width:10px;height:10px;border-radius:999px;background:${esc(p.color||'#60a5fa')}"></span>
+            <div class="h2" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</div>
+          </div>
+          <div class="muted small">чаты: ${(state.chats[p.id]||[]).length} · шаблон: ${esc(p.template||"empty")}</div>
+        </div>
+        <div class="row" style="flex-wrap:wrap;justify-content:flex-end">
+          <button class="btn" data-open="${esc(p.id)}">Открыть</button>
+          <button class="btn" data-rename="${esc(p.id)}">Имя</button>
+          <button class="btn" data-arch="${esc(p.id)}">Архив</button>
+        </div>
+      </div>
+    `;
+    list.appendChild(card);
+  });
+
+  w.appendChild(list);
+
+  setTimeout(()=>{
+    $$("button[data-open]", w).forEach(b=>{
+      b.onclick=()=>{
+        const id=b.getAttribute("data-open");
+        state.activeProjectId = id;
+        ensureProject();
+        persistAll();
+        go("chat/"+state.activeChatId);
+        toast("Открыт проект");
+      };
+    });
+    $$("button[data-rename]", w).forEach(b=>{
+      b.onclick=()=>{
+        const id=b.getAttribute("data-rename");
+        const p=state.projects.find(x=>x.id===id);
+        if(!p) return;
+        const t=prompt("Новое имя проекта:", p.name);
+        if(!t) return;
+        p.name=t.slice(0,80);
+        persistAll();
+        toast("Переименовано");
+        render();
+      };
+    });
+    $$("button[data-arch]", w).forEach(b=>{
+      b.onclick=()=>{
+        const id=b.getAttribute("data-arch");
+        const p=state.projects.find(x=>x.id===id);
+        if(!p) return;
+        p.archived = true;
+        if(state.activeProjectId===id){
+          state.activeProjectId = state.projects.find(x=>!x.archived)?.id || null;
+          ensureProject();
+        }
+        persistAll();
+        toast("В архиве");
+        render();
+      };
+    });
+  },0);
+
+  return w;
+}
+
+function projectDetailView(pid){
+  // not used in MVP; kept for future expansion
+  const w = el("div","card");
+  w.innerHTML = `<div class="h2">Проект</div><div class="muted small">ID: ${esc(pid||"—")}</div>`;
+  return w;
+}
+
+function mediaView(){
+  ensureProject();
+  const w = el("div","card");
+  w.innerHTML = `<div class="h2">Медиа</div><div class="muted small">Файлы из всех чатов (локально).</div><div class="hr"></div>`;
+
+  const media = collectAllMedia();
+  const q = (state.searchQuery||"").trim().toLowerCase();
+  const items = media.filter(a=> !q || (a.name||"").toLowerCase().includes(q));
+
+  if(items.length===0){
+    w.appendChild(emptyState("Пока пусто", "Прикрепи файл в чате — и он появится здесь.", "Открыть чат", ()=> go("chat/"+state.activeChatId)));
+    return w;
+  }
+
+  const list = el("div","col");
+  items.slice().reverse().forEach(a=>{
+    const card = el("div","card");
+    const p = state.projects.find(x=>x.id===a._projectId);
+    const chat = (state.chats[a._projectId]||[]).find(c=>c.id===a._chatId);
+    card.innerHTML = `
+      <div class="row" style="justify-content:space-between;align-items:flex-start">
+        <div style="min-width:0">
+          <div class="h2" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.name)}</div>
+          <div class="muted small">${esc(a.type||"file")} · ${formatBytes(a.size||0)}</div>
+          <div class="muted small">Проект: ${esc(p?.name||"—")} · Чат: ${esc(chat?.title||"—")}</div>
+        </div>
+        <div class="row" style="flex-wrap:wrap;justify-content:flex-end">
+          <button class="btn" data-open="${esc(a.id)}">Открыть</button>
+          <button class="btn" data-send="${esc(a.id)}">В чат</button>
+        </div>
+      </div>
+    `;
+    list.appendChild(card);
+  });
+  w.appendChild(list);
+
+  setTimeout(()=>{
+    $$("button[data-open]", w).forEach(b=>{
+      b.onclick = ()=> {
+        toast("Открытие возможно для inline-превью. Для полноценного просмотра нужно хранение/бэкенд.", true, 3000);
+      };
+    });
+    $$("button[data-send]", w).forEach(b=>{
+      b.onclick = ()=>{
+        const id=b.getAttribute("data-send");
+        const a = items.find(x=>x.id===id);
+        if(!a) return;
+        // attach as meta to pending attachments
+        state.attachments.push({...a, id:uid()});
+        go("chat/"+state.activeChatId);
+        setTimeout(()=>{ renderPendingAttachments(); }, 50);
+      };
+    });
+  },0);
+
+  return w;
+}
+
+function settingsView(){
+  const w = el("div","card");
+  w.innerHTML = `<div class="h2">Настройки</div><div class="muted small">Часть настроек — локально. В TMA можно сохранять в CloudStorage.</div><div class="hr"></div>`;
+
+  const tabs = el("div","row");
+  tabs.style.flexWrap="wrap";
+
+  const tabNames = [["profile","Профиль"],["chat","Чат"],["tma","Telegram"],["data","Данные"],["dev","Dev"]];
+  const active = state.route.params.tab || "profile";
+
+  tabNames.forEach(([id,label])=>{
+    const b = el("button","btn"+(active===id?" primary":""));
+    b.textContent = label;
+    b.onclick = ()=> { haptic("select"); go("settings?tab="+encodeURIComponent(id)); };
+    tabs.appendChild(b);
+  });
+  w.appendChild(tabs);
+  w.appendChild(el("div","hr"));
+
+  const body = el("div","col");
+  w.appendChild(body);
+
+  if(active==="profile"){
+    const c = el("div","col");
+    const who = el("div","card");
+    who.innerHTML = `<div class="h2">${esc(userLabel())}</div><div class="muted small">${tg? "Telegram user" : "Web guest"}</div>`;
+    c.appendChild(who);
+
+    const theme = el("select","input");
+    theme.innerHTML = `<option value="telegram">Telegram</option><option value="dark">Dark</option><option value="light">Light</option>`;
+    theme.value = state.settings.theme || "telegram";
+    theme.onchange = ()=>{
+      state.settings.theme = theme.value;
+      persistAll();
+      applyTelegramTheme();
+      applyThemeOverride();
+      toast("Тема применена");
+      render();
+    };
+    c.appendChild(labelWrap("Тема", theme));
+
+    const compact = checkbox("Компактный режим", state.settings.compact, (v)=>{ state.settings.compact=v; persistAll(); render(); });
+    const reduce = checkbox("Reduce motion", state.settings.reduce_motion, (v)=>{ state.settings.reduce_motion=v; persistAll(); render(); });
+    c.appendChild(compact);
+    c.appendChild(reduce);
+
+    body.appendChild(c);
+  }
+
+  if(active==="chat"){
+    const c = el("div","col");
+    const enter = checkbox("Enter отправляет (Shift+Enter новая строка)", state.settings.enter_to_send, (v)=>{ state.settings.enter_to_send=v; persistAll(); });
+    const md = checkbox("Markdown для ответов AI", state.settings.markdown, (v)=>{ state.settings.markdown=v; persistAll(); });
+    const stream = checkbox("Стриминг (DEMO)", state.settings.streaming, (v)=>{ state.settings.streaming=v; persistAll(); });
+    c.appendChild(enter); c.appendChild(md); c.appendChild(stream);
+
+    const max = el("input","input");
+    max.type="number"; max.min="1"; max.max="50";
+    max.value = state.settings.max_inline_mb || 4;
+    max.oninput = ()=>{ state.settings.max_inline_mb = clamp(parseInt(max.value||"4",10),1,50); persistAll(); };
+    c.appendChild(labelWrap("Лимит inline-превью (MB)", max));
+
+    const model = el("select","input");
+    model.innerHTML = state.models.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join("");
+    model.value = state.model;
+    model.onchange = ()=>{ state.model=model.value; persistAll(); toast("Модель сохранена"); };
+    c.appendChild(labelWrap("Модель по умолчанию", model));
+
+    body.appendChild(c);
+  }
+
+  if(active==="tma"){
+    const c = el("div","col");
+
+    const h = el("div","card");
+    h.innerHTML = `<div class="h2">Telegram</div><div class="muted small">${tg ? "WebApp API доступен" : "Открой в Telegram для TMA функций"}</div>`;
+    c.appendChild(h);
+
+    const hap = checkbox("Haptics", state.settings.haptics, (v)=>{ state.settings.haptics=v; persistAll(); });
+    c.appendChild(hap);
+
+    const cloud = checkbox("Сохранять (дублировать) настройки в CloudStorage", state.settings.save_to_cloud, async (v)=>{
+      state.settings.save_to_cloud=v; persistAll();
+      if(v && tg){
+        await CLOUD.set("settings", JSON.stringify(state.settings));
+        toast("Сохранено в CloudStorage");
+      }
+    });
+    c.appendChild(cloud);
+
+    if(tg){
+      const send = el("button","btn primary");
+      send.textContent = "Отправить diagnostics в бота";
+      send.onclick = ()=> {
+        const d = buildDiagnostics();
+        tg.sendData(JSON.stringify({type:"diagnostics", data:d}));
+        toast("Отправлено в бота");
+      };
+      c.appendChild(send);
     }
+
+    body.appendChild(c);
+  }
+
+  if(active==="data"){
+    const c = el("div","col");
+    const exp = el("button","btn"); exp.textContent="Экспорт";
+    exp.onclick = ()=> openExportModal();
+    const imp = el("button","btn"); imp.textContent="Импорт";
+    imp.onclick = ()=> openImportModal();
+    const clr = el("button","btn danger"); clr.textContent="Сброс локальных данных";
+    clr.onclick = ()=> resetLocalData();
+    c.appendChild(exp); c.appendChild(imp); c.appendChild(clr);
+    body.appendChild(c);
+  }
+
+  if(active==="dev"){
+    const c = el("div","col");
+    const api = el("input","input");
+    api.value = state.apiBase || "/api/v1";
+    api.oninput = ()=>{ state.apiBase = api.value.trim() || "/api/v1"; persistAll(); };
+    c.appendChild(labelWrap("API base", api));
+
+    const token = el("input","input");
+    token.value = state.token || "";
+    token.placeholder = "JWT token (опционально)";
+    token.oninput = ()=>{ state.token = token.value.trim(); persistAll(); };
+    c.appendChild(labelWrap("Token", token));
+
+    const ping = el("button","btn primary"); ping.textContent="Ping API";
+    ping.onclick = async ()=>{
+      try{
+        const t0=performance.now();
+        await fetch(state.apiBase + "/health", {method:"GET"});
+        const ms=Math.round(performance.now()-t0);
+        toast(`Ping: ${ms} ms`);
+      }catch(e){
+        toast("Ping failed (нет /health или CORS)", false, 3200);
+      }
+    };
+
+    const diag = el("button","btn"); diag.textContent="Скачать diagnostics.json";
+    diag.onclick = ()=> {
+      downloadBlob(new Blob([JSON.stringify(buildDiagnostics(),null,2)], {type:"application/json"}), "diagnostics.json");
+      toast("Скачано");
+    };
+
+    c.appendChild(ping);
+    c.appendChild(diag);
+    body.appendChild(c);
+  }
+
+  // cloud sync (optional)
+  setTimeout(async ()=>{
+    if(tg && state.settings.save_to_cloud){
+      const v = await CLOUD.get("settings");
+      if(v){
+        try{
+          const parsed = JSON.parse(v);
+          state.settings = {...state.settings, ...parsed};
+          persistAll();
+          applyTelegramTheme();
+          applyThemeOverride();
+          render();
+        }catch{}
+      }
+      // always push latest
+      await CLOUD.set("settings", JSON.stringify(state.settings));
+    }
+  },0);
+
+  return w;
+}
+
+function diagnosticsView(){
+  const d = buildDiagnostics();
+  const w = el("div","card");
+  w.innerHTML = `<div class="h2">Диагностика</div><div class="muted small">Полезно для отладки на устройствах.</div><div class="hr"></div>`;
+  const pre = el("pre","");
+  pre.style.whiteSpace="pre-wrap";
+  pre.style.margin="0";
+  pre.style.fontSize="12px";
+  pre.textContent = JSON.stringify(d,null,2);
+  w.appendChild(pre);
+
+  const row = el("div","row");
+  row.style.flexWrap="wrap";
+  const b1 = el("button","btn primary"); b1.textContent="Скачать";
+  b1.onclick = ()=> downloadBlob(new Blob([JSON.stringify(d,null,2)], {type:"application/json"}), "diagnostics.json");
+  const b2 = el("button","btn"); b2.textContent="Отправить в бота";
+  b2.onclick = ()=> {
+    if(!tg) return toast("Открой в Telegram", false);
+    tg.sendData(JSON.stringify({type:"diagnostics", data:d}));
+    toast("Отправлено");
   };
-
-  $('#btnCloudSave', wrap).onclick = async ()=> cloudSave();
-  $('#btnCloudLoad', wrap).onclick = async ()=> cloudLoad();
-
-  $('#btnClear', wrap).onclick = async ()=> resetLocal();
-
-  return wrap;
-}
-
-function setBtnState(sel, on){
-  const b = $(sel);
-  if (!b) return;
-  b.classList.toggle('primary', !!on);
-}
-
-// ---------- Diagnostics ----------
-function renderDiagnostics(){
-  const wrap = el('div','card section');
-  wrap.innerHTML = `
-    <div style="font-weight:800;">Диагностика</div>
-    <div class="muted small" style="margin-top:6px;">Снимок состояния для отладки</div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap;">
-      <button class="btn" id="dlDiag">Скачать diagnostics.json</button>
-      <button class="btn" id="logBot">Отправить лог в бота</button>
-    </div>
-    <div class="hr"></div>
-    <pre id="diagPre"></pre>
-  `;
-
-  const diag = buildDiagnostics();
-  $('#diagPre', wrap).textContent = JSON.stringify(diag, null, 2);
-
-  $('#dlDiag', wrap).onclick = ()=> downloadJson(diag, 'diagnostics.json');
-  $('#logBot', wrap).onclick = ()=> TG.sendData({type:'diagnostics', diag});
-
-  return wrap;
+  row.appendChild(b1); row.appendChild(b2);
+  w.appendChild(el("div","hr"));
+  w.appendChild(row);
+  return w;
 }
 
 function buildDiagnostics(){
   return {
-    at: new Date().toISOString(),
-    isTelegram: !!tg,
-    user: TG.user ? {id: TG.user.id, username: TG.user.username, first_name: TG.user.first_name, language_code: TG.user.language_code} : null,
-    themeParams: tg?.themeParams || null,
-    viewport: tg ? {height: tg.viewportHeight, stableHeight: tg.viewportStableHeight, expanded: tg.isExpanded} : null,
-    api: { base: API.base, authed: isAuthed() },
-    settings: Settings.export(),
-    chat: { messages: State.chat.length, last: State.chat.slice(-3) },
-    projects: { count: State.projects.length, activeProjectId: State.activeProjectId },
-    media: { imageLoaded: !!State.media.image.src, videoLoaded: !!State.media.video.file, ffmpegReady: !!State.media.video.ffmpegReady }
+    version: "tma-spa-1",
+    ts: new Date().toISOString(),
+    tg: tg ? {
+      platform: tg.platform,
+      version: tg.version,
+      colorScheme: tg.colorScheme,
+      isExpanded: tg.isExpanded,
+      viewportStableHeight: tg.viewportStableHeight,
+      viewportHeight: tg.viewportHeight,
+      themeParams: tg.themeParams
+    } : null,
+    user: state.tgUser ? {id: state.tgUser.id, name: userLabel(), lang: state.tgUser.language_code} : null,
+    route: state.route,
+    projects: state.projects.length,
+    activeProjectId: state.activeProjectId,
+    chatsInProject: (state.chats[state.activeProjectId]||[]).length,
+    activeChatId: state.activeChatId,
+    settings: state.settings,
+    apiBase: state.apiBase,
+    hasToken: !!state.token,
+    ua: navigator.userAgent,
+    online: navigator.onLine
   };
 }
 
-// ---------- Protected sections (stubs until backend) ----------
-function stubSection(title, hint){
-  const w = el('div','card section');
-  w.innerHTML = `
-    <div style="font-weight:800;">${esc(title)}</div>
-    <div class="muted" style="margin-top:6px;">${esc(hint)}</div>
-    <div class="hr"></div>
-    <div class="row" style="flex-wrap:wrap;">
-      <button class="btn" id="btnLoad">Загрузить</button>
-      <button class="btn" id="btnSave">Сохранить</button>
-    </div>
-    <div class="muted small" style="margin-top:10px;">Этот экран готов для подключения к бэкенду.</div>
-  `;
-  w.addEventListener('click', (e)=>{
-    if (e.target?.id === 'btnLoad') TG.toastOK('TODO: backend');
-    if (e.target?.id === 'btnSave') TG.toastOK('TODO: backend');
-  });
+function checkbox(label, value, onChange){
+  const w = el("div","row");
+  w.style.justifyContent="space-between";
+  const left = el("div","");
+  left.textContent = label;
+  const cb = el("input","");
+  cb.type="checkbox";
+  cb.checked = !!value;
+  cb.onchange = ()=>{ onChange(cb.checked); toast("Сохранено"); };
+  w.appendChild(left);
+  w.appendChild(cb);
   return w;
 }
 
-function renderKeys(){
-  const w = stubSection('Ключи', 'Управление API-ключами (ввод/маскирование/удаление)');
-  // minimal local key vault (masked)
-  const vault = LS.get('aip.keys.v1', []);
-  const box = el('div');
-  box.style.marginTop='12px';
-  box.innerHTML = `
-    <div class="hr"></div>
-    <div style="font-weight:700;">Локально</div>
-    <div class="muted small" style="margin-top:6px;">Хранится в localStorage (небезопасно для продакшена).</div>
-    <div class="row" style="flex-wrap:wrap;margin-top:10px;">
-      <input id="kName" class="textarea" style="min-height:44px;max-height:44px;" placeholder="Название" />
-      <input id="kVal" class="textarea" style="min-height:44px;max-height:44px;" placeholder="Ключ" />
-      <button class="btn primary" id="kAdd">Добавить</button>
-    </div>
-    <div id="kList" style="margin-top:10px;"></div>
-  `;
-  w.appendChild(box);
+function formatBytes(n){
+  const u=["B","KB","MB","GB"];
+  let i=0, v=n||0;
+  while(v>=1024 && i<u.length-1){ v/=1024; i++; }
+  return (i===0? v : v.toFixed(1))+" "+u[i];
+}
 
-  const renderList = ()=>{
-    const list = $('#kList', w);
-    list.innerHTML='';
-    const items = LS.get('aip.keys.v1', []);
-    if (!items.length) {
-      const m = el('div','muted small'); m.textContent='Ключей нет'; list.appendChild(m); return;
-    }
-    items.forEach((it, idx)=>{
-      const row = el('div','card section');
-      row.style.marginBottom='8px';
-      const masked = String(it.value||'').slice(0,4) + '••••' + String(it.value||'').slice(-4);
-      row.innerHTML = `
-        <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;">
-          <div>
-            <div style="font-weight:700;">${esc(it.name||'key')}</div>
-            <div class="muted small">${esc(masked)}</div>
-          </div>
-          <div class="row">
-            <button class="btn" data-act="copy" data-i="${idx}" style="height:32px;">Копировать</button>
-            <button class="btn danger" data-act="del" data-i="${idx}" style="height:32px;">Удалить</button>
-          </div>
-        </div>
-      `;
-      list.appendChild(row);
-    });
+function openChatToolsModal(){
+  const c = el("div","col");
+  const b1 = el("button","btn"); b1.textContent="Экспорт текущего чата (txt)";
+  b1.onclick = ()=>{
+    const chat = currentChat();
+    const text = (chat?.messages||[]).map(m=>`${m.role.toUpperCase()}: ${m.text}`).join("\n\n");
+    downloadBlob(new Blob([text],{type:"text/plain"}), `chat-${chat?.id||"export"}.txt`);
+    toast("Скачано");
   };
 
-  renderList();
+  const b2 = el("button","btn"); b2.textContent="Открыть фото-редактор";
+  b2.onclick = ()=> openPhotoEditor();
 
-  $('#kAdd', w).onclick = ()=>{
-    const name = ($('#kName', w).value||'').trim();
-    const value = ($('#kVal', w).value||'').trim();
-    if (!name || !value) return TG.toastErr('Заполни оба поля');
-    const items = LS.get('aip.keys.v1', []);
-    items.unshift({name, value, createdAt: Date.now()});
-    LS.set('aip.keys.v1', items);
-    $('#kName', w).value='';
-    $('#kVal', w).value='';
-    renderList();
-    TG.toastOK('Добавлено');
+  const b3 = el("button","btn"); b3.textContent="Открыть видео-редактор (trim)";
+  b3.onclick = ()=> openVideoEditor();
+
+  c.appendChild(b1);
+  c.appendChild(b2);
+  c.appendChild(b3);
+  showModal("Инструменты", c);
+}
+
+/* ----------------------- Photo editor (basic) ----------------------- */
+function openPhotoEditor(){
+  const c = el("div","col");
+
+  const info = el("div","muted small");
+  info.textContent = "MVP редактор: яркость/контраст/насыщенность, поворот, скачать PNG, отправить в чат (как вложение).";
+  c.appendChild(info);
+
+  const pick = el("input","input");
+  pick.type="file";
+  pick.accept="image/*";
+
+  const canvas = el("canvas","");
+  canvas.style.width="100%";
+  canvas.style.border="1px solid var(--line)";
+  canvas.style.borderRadius="14px";
+  canvas.style.background="rgba(0,0,0,.12)";
+
+  const ctx = canvas.getContext("2d");
+  let img=null, angle=0, filt={b:1,c:1,s:1};
+
+  function redraw(){
+    if(!img) return;
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const rot = ((angle%360)+360)%360;
+    const cw = (rot===90||rot===270) ? h : w;
+    const ch = (rot===90||rot===270) ? w : h;
+    canvas.width = cw;
+    canvas.height = ch;
+
+    ctx.save();
+    ctx.clearRect(0,0,cw,ch);
+    ctx.filter = `brightness(${filt.b}) contrast(${filt.c}) saturate(${filt.s})`;
+    ctx.translate(cw/2, ch/2);
+    ctx.rotate((rot*Math.PI)/180);
+    ctx.drawImage(img, -w/2, -h/2);
+    ctx.restore();
+  }
+
+  pick.onchange = ()=>{
+    const f = pick.files?.[0];
+    if(!f) return;
+    const url = URL.createObjectURL(f);
+    const im = new Image();
+    im.onload = ()=>{ img=im; angle=0; filt={b:1,c:1,s:1}; redraw(); URL.revokeObjectURL(url); };
+    im.src = url;
   };
 
-  w.addEventListener('click', async (e)=>{
-    const btn = e.target?.closest('button');
-    if (!btn) return;
-    const act = btn.dataset.act;
-    const i = Number(btn.dataset.i);
-    if (!act) return;
-    const items = LS.get('aip.keys.v1', []);
-    const it = items[i];
-    if (!it) return;
-    if (act==='copy') {
-      try { await navigator.clipboard.writeText(it.value); TG.toastOK('Скопировано'); } catch { TG.toastErr('Clipboard недоступен'); }
-    }
-    if (act==='del') {
-      const ok = await TG.confirm('Удалить', `Удалить ключ “${it.name}”?`);
-      if (!ok) return;
-      items.splice(i,1);
-      LS.set('aip.keys.v1', items);
-      renderList();
-      TG.toastOK('Удалено');
-    }
-  });
+  const sliders = el("div","col");
+  sliders.appendChild(range("Яркость", 0.5, 1.8, 0.01, 1, (v)=>{filt.b=v; redraw();}));
+  sliders.appendChild(range("Контраст", 0.5, 1.8, 0.01, 1, (v)=>{filt.c=v; redraw();}));
+  sliders.appendChild(range("Насыщенность", 0, 2, 0.01, 1, (v)=>{filt.s=v; redraw();}));
 
+  const row = el("div","row");
+  row.style.flexWrap="wrap";
+  const rotL = el("button","btn"); rotL.textContent="⟲";
+  rotL.onclick=()=>{ angle-=90; redraw(); };
+  const rotR = el("button","btn"); rotR.textContent="⟳";
+  rotR.onclick=()=>{ angle+=90; redraw(); };
+  const dl = el("button","btn primary"); dl.textContent="Скачать PNG";
+  dl.onclick=()=>{
+    canvas.toBlob((blob)=>{
+      if(!blob) return;
+      downloadBlob(blob, "edited.png");
+      toast("Скачано");
+    }, "image/png");
+  };
+  const toChat = el("button","btn"); toChat.textContent="В чат (как вложение)";
+  toChat.onclick=()=>{
+    canvas.toBlob((blob)=>{
+      if(!blob) return;
+      const file = new File([blob], "edited.png", {type:"image/png"});
+      state.attachments.push(fileToAttachment(file));
+      toast("Добавлено в вложения");
+      go("chat/"+state.activeChatId);
+      setTimeout(()=> renderPendingAttachments(), 60);
+    }, "image/png");
+  };
+
+  row.appendChild(rotL); row.appendChild(rotR); row.appendChild(dl); row.appendChild(toChat);
+
+  // paste image
+  window.addEventListener("paste", onPaste, {once:true});
+  function onPaste(e){
+    const item = Array.from(e.clipboardData?.items||[]).find(it=> it.type.startsWith("image/"));
+    if(item){
+      const f = item.getAsFile();
+      if(f){
+        const dt = new DataTransfer(); dt.items.add(f);
+        pick.files = dt.files;
+        pick.dispatchEvent(new Event("change"));
+        toast("Вставлено из буфера");
+      }
+    }
+  }
+
+  c.appendChild(pick);
+  c.appendChild(canvas);
+  c.appendChild(sliders);
+  c.appendChild(row);
+
+  showModal("Фото-редактор", c, {onClose: ()=>{}});
+}
+
+function range(label, min, max, step, value, onInput){
+  const w = el("div","col");
+  const l = el("div","small muted"); l.textContent = `${label}: ${value}`;
+  const r = el("input","input");
+  r.type="range"; r.min=min; r.max=max; r.step=step; r.value=value;
+  r.oninput = ()=>{ l.textContent = `${label}: ${Number(r.value).toFixed(2)}`; onInput(Number(r.value)); };
+  w.appendChild(l); w.appendChild(r);
   return w;
 }
 
-function renderReminders(){
-  return stubSection('Напоминания', 'Создание напоминаний (требуется бэкенд + бот для уведомлений)');
-}
-function renderCalendar(){
-  return stubSection('Календарь', 'Синхронизация календаря (требуется бэкенд/интеграции)');
-}
-function renderNotifications(){
-  return stubSection('Уведомления', 'Подписки и уведомления (требуется бэкенд/бот)');
-}
+/* ----------------------- Video editor (trim via ffmpeg.wasm, lazy) ----------------------- */
+async function openVideoEditor(){
+  const c = el("div","col");
+  const info = el("div","muted small");
+  info.textContent = "Trim видео работает в браузере через ffmpeg.wasm (подгружается с CDN). Для больших файлов может быть тяжело на телефоне.";
+  c.appendChild(info);
 
-// ---------- Modal ----------
-function renderModal(){
-  const m = el('div','modal show');
-  const bd = el('div','backdrop show');
-  bd.onclick = ()=>{ State.modal=null; requestRender(); };
-  m.appendChild(bd);
+  const pick = el("input","input");
+  pick.type="file";
+  pick.accept="video/*";
 
-  const card = el('div','card section modal-card');
+  const v = document.createElement("video");
+  v.controls = true;
+  v.style.width="100%";
+  v.style.borderRadius="14px";
+  v.style.border="1px solid var(--line)";
+  v.style.background="rgba(0,0,0,.12)";
+  v.preload="metadata";
 
-  const close = el('button','btn');
-  close.textContent = 'Закрыть';
-  close.onclick = ()=>{ State.modal=null; requestRender(); };
+  const start = el("input","input"); start.type="number"; start.min="0"; start.step="0.1"; start.placeholder="Start (сек)";
+  const dur = el("input","input"); dur.type="number"; dur.min="0.1"; dur.step="0.1"; dur.placeholder="Duration (сек)";
+  const row = el("div","row"); row.style.flexWrap="wrap";
+  const trim = el("button","btn primary"); trim.textContent="Trim → MP4";
+  const toChat = el("button","btn"); toChat.textContent="В чат";
+  toChat.disabled = true;
 
-  const type = State.modal?.type;
+  let file=null, outBlob=null;
 
-  if (type === 'quick') {
-    card.innerHTML = `
-      <div style="font-weight:800;">Меню</div>
-      <div class="muted small" style="margin-top:6px;">${esc(TG.user ? 'Telegram user' : 'Guest mode')}</div>
-      <div class="hr"></div>
-      <div class="row" style="flex-wrap:wrap;">
-        <button class="btn" id="qExport">Экспорт</button>
-        <button class="btn" id="qImport">Импорт</button>
-        <button class="btn" id="qDiag">Диагностика</button>
-        <button class="btn" id="qSettings">Настройки</button>
-      </div>
-      <div class="hr"></div>
-      <div class="row" style="flex-wrap:wrap;">
-        <button class="btn" id="qCloudSave">Cloud Save</button>
-        <button class="btn" id="qCloudLoad">Cloud Load</button>
-        <button class="btn" id="qAuth">TG auth</button>
-        <button class="btn danger" id="qReset">Сброс</button>
-      </div>
-      <div class="hr"></div>
-    `;
-    card.appendChild(close);
+  pick.onchange = ()=>{
+    file = pick.files?.[0] || null;
+    outBlob=null; toChat.disabled=true;
+    if(!file) return;
+    const url = URL.createObjectURL(file);
+    v.src = url;
+  };
 
-    card.addEventListener('click', async (e)=>{
-      const id = e.target?.id;
-      if (!id) return;
-      if (id==='qExport') await exportAll();
-      if (id==='qImport') await importAll();
-      if (id==='qDiag') setRoute('diagnostics');
-      if (id==='qSettings') setRoute('settings');
-      if (id==='qCloudSave') await cloudSave();
-      if (id==='qCloudLoad') await cloudLoad();
-      if (id==='qAuth') await telegramAuth();
-      if (id==='qReset') await resetLocal();
-      State.modal = null;
-      requestRender();
-    });
-  }
-
-  if (type === 'pickProject') {
-    card.innerHTML = `
-      <div style="font-weight:800;">Выбор проекта</div>
-      <div class="muted small" style="margin-top:6px;">Свяжи чат с проектом</div>
-      <div class="hr"></div>
-      <div id="plist"></div>
-      <div class="hr"></div>
-      <div class="row" style="flex-wrap:wrap;">
-        <button class="btn primary" id="pNew">Создать</button>
-        <button class="btn" id="pNone">Без проекта</button>
-      </div>
-    `;
-
-    const list = $('#plist', card);
-    const items = [...State.projects].sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
-    if (!items.length) {
-      const m0 = el('div','muted small'); m0.textContent='Проектов нет.'; list.appendChild(m0);
-    } else {
-      items.forEach(p=>{
-        const b = el('button','btn navbtn' + (p.id===State.activeProjectId?' active':''));
-        b.innerHTML = `<span>${esc(p.name||'Без названия')}</span><span class="muted small">${new Date(p.updatedAt||Date.now()).toLocaleDateString()}</span>`;
-        b.onclick = ()=>{
-          State.activeProjectId = p.id;
-          persistProjects();
-          State.modal=null;
-          requestRender();
-        };
-        list.appendChild(b);
-      });
+  trim.onclick = async ()=>{
+    if(!file) return toast("Выбери видео", false);
+    const s = Math.max(0, Number(start.value||"0"));
+    const d = Math.max(0.1, Number(dur.value||"2"));
+    try{
+      toast("Загрузка ffmpeg…", true, 1800);
+      const {createFFmpeg, fetchFile} = await loadFFmpeg();
+      const ffmpeg = createFFmpeg({log:false});
+      if(!ffmpeg.isLoaded()) await ffmpeg.load();
+      ffmpeg.FS("writeFile", "in.mp4", await fetchFile(file));
+      // -ss start -t duration -c copy (fast) but may fail on some codecs; fallback to re-encode
+      try{
+        await ffmpeg.run("-ss", String(s), "-t", String(d), "-i", "in.mp4", "-c", "copy", "out.mp4");
+      }catch{
+        await ffmpeg.run("-ss", String(s), "-t", String(d), "-i", "in.mp4", "-c:v", "libx264", "-c:a", "aac", "out.mp4");
+      }
+      const data = ffmpeg.FS("readFile", "out.mp4");
+      outBlob = new Blob([data.buffer], {type:"video/mp4"});
+      downloadBlob(outBlob, "trimmed.mp4");
+      toast("Готово: скачано");
+      toChat.disabled = false;
+    }catch(e){
+      toast("Trim error: "+e.message, false, 3500);
     }
-
-    card.appendChild(el('div','hr'));
-    card.appendChild(close);
-
-    card.addEventListener('click', (e)=>{
-      if (e.target?.id === 'pNew') { State.modal = {type:'editProject', id:null}; requestRender(); }
-      if (e.target?.id === 'pNone') { State.activeProjectId = null; persistProjects(); State.modal=null; requestRender(); }
-    });
-  }
-
-  if (type === 'editProject') {
-    const id = State.modal.id;
-    const p = id ? State.projects.find(x=>x.id===id) : null;
-    card.innerHTML = `
-      <div style="font-weight:800;">${p?'Редактировать':'Создать'} проект</div>
-      <div class="hr"></div>
-      <label class="muted small">Название</label>
-      <input id="pn" class="textarea" style="min-height:44px;max-height:44px;" placeholder="Например: Мой проект" value="${esc(p?.name||'')}" />
-      <div style="height:10px"></div>
-      <label class="muted small">Описание</label>
-      <textarea id="pd" class="textarea" placeholder="Коротко о проекте…">${esc(p?.desc||'')}</textarea>
-      <div style="height:10px"></div>
-      <label class="muted small">Теги (через запятую)</label>
-      <input id="pt" class="textarea" style="min-height:44px;max-height:44px;" placeholder="ai, web, tg" value="${esc((p?.tags||[]).join(', '))}" />
-      <div class="hr"></div>
-      <div class="row" style="flex-wrap:wrap;">
-        <button class="btn primary" id="psave">Сохранить</button>
-        ${p?'<button class="btn danger" id="pdel">Удалить</button>':''}
-        <button class="btn" id="pcancel">Отмена</button>
-      </div>
-    `;
-
-    card.addEventListener('click', async (e)=>{
-      if (e.target?.id === 'pcancel') { State.modal=null; requestRender(); }
-      if (e.target?.id === 'psave') {
-        const name = ($('#pn', card).value||'').trim() || 'Без названия';
-        const desc = ($('#pd', card).value||'').trim();
-        const tags = ($('#pt', card).value||'').split(',').map(s=>s.trim()).filter(Boolean).slice(0,12);
-
-        const obj = p ? {...p} : {id: crypto.randomUUID(), chats:[]};
-        obj.name = name;
-        obj.desc = desc;
-        obj.tags = tags;
-        obj.updatedAt = Date.now();
-
-        upsertProject(obj);
-        State.activeProjectId = obj.id;
-        persistProjects();
-        TG.toastOK('Сохранено');
-        State.modal=null;
-        requestRender();
-      }
-      if (e.target?.id === 'pdel' && p) {
-        const ok = await TG.confirm('Удалить проект', `Удалить “${p.name}”?`);
-        if (!ok) return;
-        deleteProject(p.id);
-        TG.toastOK('Удалено');
-        State.modal=null;
-        requestRender();
-      }
-    });
-
-    card.appendChild(el('div','hr'));
-    card.appendChild(close);
-  }
-
-  if (type === 'projectDetails') {
-    const p = State.projects.find(x=>x.id===State.modal.id);
-    if (!p) { State.modal=null; requestRender(); return m; }
-
-    const msgs = p.chats ? State.chat.filter(m=>p.chats.includes(m.id)) : [];
-
-    card.innerHTML = `
-      <div style="font-weight:800;">${esc(p.name||'Проект')}</div>
-      <div class="muted small" style="margin-top:6px;">Обновлён: ${new Date(p.updatedAt||Date.now()).toLocaleString()}</div>
-      <div class="hr"></div>
-      <div class="muted">${esc(p.desc||'')}</div>
-      <div class="muted small" style="margin-top:6px;">${(p.tags||[]).map(t=>`#${esc(t)}`).join(' ')}</div>
-      <div class="hr"></div>
-      <div class="row" style="flex-wrap:wrap;">
-        <button class="btn" id="pEdit">Редактировать</button>
-        <button class="btn" id="pExport">Экспорт MD</button>
-        <button class="btn" id="pToChat">Открыть чат</button>
-      </div>
-      <div class="hr"></div>
-      <div style="font-weight:700;">Сообщения: ${msgs.length}</div>
-      <div class="muted small" style="margin-top:6px;">Показываются только сообщения, связанные с проектом.</div>
-    `;
-
-    card.addEventListener('click', (e)=>{
-      if (e.target?.id === 'pEdit') { State.modal = {type:'editProject', id:p.id}; requestRender(); }
-      if (e.target?.id === 'pToChat') { State.activeProjectId = p.id; persistProjects(); State.modal=null; setRoute('chat'); }
-      if (e.target?.id === 'pExport') {
-        const md = exportProjectMarkdown(p, msgs);
-        downloadText(md, `${(p.name||'project').replace(/[^a-z0-9а-яё_-]+/gi,'_')}.md`);
-        TG.toastOK('Экспортировано');
-      }
-    });
-
-    card.appendChild(el('div','hr'));
-    card.appendChild(close);
-  }
-
-  if (type === 'searchChat') {
-    card.innerHTML = `
-      <div style="font-weight:800;">Поиск по чату</div>
-      <div class="hr"></div>
-      <input id="sq" class="textarea" style="min-height:44px;max-height:44px;" placeholder="Текст…" />
-      <div class="hr"></div>
-      <div id="sr"></div>
-    `;
-    card.appendChild(close);
-
-    const q = $('#sq', card);
-    const r = $('#sr', card);
-    q.oninput = ()=>{
-      const s = (q.value||'').trim().toLowerCase();
-      r.innerHTML='';
-      if (!s) return;
-      const found = State.chat.filter(m=> (m.text||'').toLowerCase().includes(s)).slice(-20);
-      if (!found.length) { const m = el('div','muted small'); m.textContent='Ничего не найдено'; r.appendChild(m); return; }
-      found.forEach(m=>{
-        const b = el('button','btn navbtn');
-        b.innerHTML = `<span>${esc((m.text||'').slice(0,40))}${(m.text||'').length>40?'…':''}</span><span class="muted small">${m.role==='me'?'Вы':'AI'}</span>`;
-        b.onclick = ()=>{
-          State.modal=null;
-          requestRender();
-          // crude: scroll to bottom (we keep latest). In future: message anchors.
-        };
-        r.appendChild(b);
-      });
-    };
-    setTimeout(()=> q.focus(), 0);
-  }
-
-  if (type === 'imageEditor') {
-    // dedicated editor for a draft attachment
-    const idx = State.modal.fromDraftIndex;
-    const a = State.draft.attachments?.[idx];
-    if (!a?.dataUrl) { State.modal=null; requestRender(); return m; }
-
-    card.innerHTML = `
-      <div style="font-weight:800;">Редактор изображения</div>
-      <div class="muted small" style="margin-top:6px;">Изменения применяются к вложению</div>
-      <div class="hr"></div>
-      <div class="canvas-wrap"><canvas id="edCanvas" width="900" height="600"></canvas></div>
-      <div class="hr"></div>
-      <div class="grid" style="grid-template-columns:1fr 1fr;">
-        <div>
-          <div class="muted small">Яркость</div>
-          <input type="range" id="edB" min="0" max="2" step="0.01" value="1" />
-        </div>
-        <div>
-          <div class="muted small">Контраст</div>
-          <input type="range" id="edC" min="0" max="2" step="0.01" value="1" />
-        </div>
-        <div>
-          <div class="muted small">Насыщенность</div>
-          <input type="range" id="edS" min="0" max="3" step="0.01" value="1" />
-        </div>
-        <div>
-          <div class="muted small">Поворот</div>
-          <input type="range" id="edR" min="-180" max="180" step="1" value="0" />
-        </div>
-      </div>
-      <div class="hr"></div>
-      <div class="row" style="flex-wrap:wrap;">
-        <button class="btn primary" id="edApply">Применить</button>
-        <button class="btn" id="edCancel">Отмена</button>
-      </div>
-    `;
-
-    const c = $('#edCanvas', card);
-    const ctx = c.getContext('2d');
-    let f = {brightness:1, contrast:1, saturate:1, rotate:0};
-
-    const draw = ()=>{
-      const img = new Image();
-      img.onload = ()=>{
-        ctx.save();
-        ctx.clearRect(0,0,c.width,c.height);
-        const scale = Math.min(c.width/img.width, c.height/img.height);
-        const w = img.width*scale;
-        const h = img.height*scale;
-        ctx.filter = `brightness(${f.brightness}) contrast(${f.contrast}) saturate(${f.saturate})`;
-        ctx.translate(c.width/2, c.height/2);
-        ctx.rotate((f.rotate||0)*Math.PI/180);
-        ctx.drawImage(img, -w/2, -h/2, w, h);
-        ctx.restore();
-      };
-      img.src = a.dataUrl;
-    };
-
-    draw();
-
-    $('#edB', card).oninput = (e)=>{ f.brightness = Number(e.target.value); draw(); };
-    $('#edC', card).oninput = (e)=>{ f.contrast = Number(e.target.value); draw(); };
-    $('#edS', card).oninput = (e)=>{ f.saturate = Number(e.target.value); draw(); };
-    $('#edR', card).oninput = (e)=>{ f.rotate = Number(e.target.value); draw(); };
-
-    card.addEventListener('click', (e)=>{
-      if (e.target?.id === 'edCancel') { State.modal=null; requestRender(); }
-      if (e.target?.id === 'edApply') {
-        const url = c.toDataURL('image/png');
-        a.dataUrl = url;
-        a.type = 'image/png';
-        a.name = a.name.replace(/\.[a-z0-9]+$/i,'') + '.png';
-        a.size = url.length;
-        persistDraft();
-        TG.toastOK('Применено');
-        State.modal=null;
-        requestRender();
-      }
-    });
-  }
-
-  m.appendChild(card);
-  return m;
-}
-
-// ---------- Export / Import / Reset ----------
-function exportAllObject(){
-  return {
-    version: 2,
-    exportedAt: new Date().toISOString(),
-    settings: Settings.export(),
-    chat: State.chat,
-    draft: State.draft,
-    projects: State.projects,
-    activeProjectId: State.activeProjectId,
-    keys: LS.get('aip.keys.v1', [])
   };
-}
 
-async function exportAll(){
-  const obj = exportAllObject();
-  downloadJson(obj, 'ai-platform-export.json');
-  TG.haptic('notify','success');
-}
-
-function importAllObject(obj){
-  if (!obj || typeof obj !== 'object') throw new Error('bad');
-  if (obj.settings) Settings.import(obj.settings);
-  if (Array.isArray(obj.chat)) { State.chat = obj.chat; persistChat(); }
-  if (obj.draft && typeof obj.draft === 'object') { State.draft = obj.draft; persistDraft(); }
-  if (Array.isArray(obj.projects)) { State.projects = obj.projects; State.activeProjectId = obj.activeProjectId || null; persistProjects(); }
-  if (Array.isArray(obj.keys)) LS.set('aip.keys.v1', obj.keys);
-}
-
-async function importAll(){
-  // open file picker via modal
-  const input = document.createElement('input');
-  input.type='file';
-  input.accept='application/json';
-  input.onchange = async ()=>{
-    const f = input.files?.[0];
-    if (!f) return;
-    try {
-      const obj = JSON.parse(await f.text());
-      importAllObject(obj);
-      TG.toastOK('Импортировано');
-      requestRender();
-    } catch { TG.toastErr('Неверный JSON'); }
+  toChat.onclick = ()=>{
+    if(!outBlob) return;
+    const outFile = new File([outBlob], "trimmed.mp4", {type:"video/mp4"});
+    state.attachments.push(fileToAttachment(outFile));
+    toast("Добавлено в вложения");
+    go("chat/"+state.activeChatId);
+    setTimeout(()=> renderPendingAttachments(), 60);
   };
-  input.click();
+
+  row.appendChild(trim);
+  row.appendChild(toChat);
+
+  c.appendChild(pick);
+  c.appendChild(v);
+  c.appendChild(labelWrap("Start (сек)", start));
+  c.appendChild(labelWrap("Duration (сек)", dur));
+  c.appendChild(row);
+
+  showModal("Видео-редактор", c);
 }
 
-async function resetLocal(){
-  const ok = await TG.confirm('Сброс', 'Удалить локальные данные (чат, проекты, настройки)?');
-  if (!ok) return;
-  // keep token unless user logs out explicitly
-  LS.del(Settings.key);
-  LS.del('aip.chat.v2');
-  LS.del('aip.draft.v2');
-  LS.del('aip.projects.v2');
-  LS.del('aip.activeProject');
-  LS.del('aip.keys.v1');
-  Settings.load();
-  State.chat = [];
-  State.draft = {text:'', attachments:[]};
-  State.projects = [];
-  State.activeProjectId = null;
-  TG.toastOK('Сброшено');
-  requestRender();
+let ffmpegCache = null;
+async function loadFFmpeg(){
+  if(ffmpegCache) return ffmpegCache;
+  // CDN scripts (unpkg). Works without bundlers.
+  await loadScript("https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/ffmpeg.min.js");
+  // window.FFmpeg
+  if(!window.FFmpeg) throw new Error("FFmpeg lib not loaded");
+  ffmpegCache = window.FFmpeg;
+  return ffmpegCache;
 }
-
-// ---------- CloudStorage ----------
-async function cloudSave(){
-  if (!tg?.CloudStorage) return TG.toastErr('CloudStorage доступен только в Telegram');
-  const obj = exportAllObject();
-  const ok = await TG.cloudSet('aip.export.v2', JSON.stringify(obj));
-  ok ? TG.toastOK('Сохранено в CloudStorage') : TG.toastErr('Не удалось сохранить');
-}
-
-async function cloudLoad(){
-  if (!tg?.CloudStorage) return TG.toastErr('CloudStorage доступен только в Telegram');
-  const raw = await TG.cloudGet('aip.export.v2');
-  if (!raw) return TG.toastErr('В CloudStorage нет данных');
-  try {
-    const obj = JSON.parse(raw);
-    importAllObject(obj);
-    TG.toastOK('Загружено из CloudStorage');
-    requestRender();
-  } catch {
-    TG.toastErr('Данные в CloudStorage повреждены');
-  }
-}
-
-// ---------- Telegram Auth (backend) ----------
-async function telegramAuth(){
-  if (!tg) return TG.toastErr('Открой в Telegram');
-  if (!tg.initData) return TG.toastErr('Нет tg.initData');
-
-  try {
-    const res = await API.req('/auth/telegram', {method:'POST', body:{ init_data: tg.initData }});
-    const token = res?.access_token || res?.token;
-    if (!token) throw new Error('Нет токена в ответе');
-    API.setToken(token);
-    TG.toastOK('Авторизация успешна');
-    requestRender();
-  } catch (e) {
-    TG.toastErr(`TG auth: ${e.message || e}`);
-  }
-}
-
-// ---------- Send all to bot ----------
-async function sendAllToBot(){
-  const obj = exportAllObject();
-  TG.sendData({type:'export', payload: obj});
-  TG.toastOK('Экспорт отправлен в бота через tg.sendData');
-}
-
-// ---------- Logging ----------
-function logEvent(name, data={}){
-  if (!Settings.get('logToBot')) return;
-  TG.sendData({type:'log', name, data, at: Date.now()});
-}
-
-// ---------- Download helpers ----------
-function downloadBlob(blob, filename){
-  const url = URL.createObjectURL(blob);
-  downloadDataUrl(url, filename);
-  setTimeout(()=>{ try{ URL.revokeObjectURL(url); }catch{} }, 1000);
-}
-
-function downloadDataUrl(url, filename){
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
-function downloadJson(obj, filename){
-  const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
-  downloadBlob(blob, filename);
-}
-
-function downloadText(text, filename){
-  const blob = new Blob([text], {type:'text/plain'});
-  downloadBlob(blob, filename);
-}
-
-function exportProjectMarkdown(p, msgs){
-  const lines = [];
-  lines.push(`# ${p.name||'Проект'}`);
-  if (p.desc) lines.push(`\n${p.desc}\n`);
-  if (p.tags?.length) lines.push(`\nТеги: ${p.tags.map(t=>`#${t}`).join(' ')}\n`);
-  lines.push('\n---\n');
-  lines.push('## Чат\n');
-  msgs.forEach(m=>{
-    lines.push(`**${m.role==='me'?'Вы':'AI'}** (${new Date(m.ts).toLocaleString()}):\n\n${m.text||''}\n`);
+function loadScript(src){
+  return new Promise((resolve,reject)=>{
+    const s=document.createElement("script");
+    s.src=src; s.onload=resolve; s.onerror=()=>reject(new Error("Failed to load "+src));
+    document.head.appendChild(s);
   });
-  return lines.join('\n');
 }
 
-// ---------- Boot ----------
-async function boot(){
-  Settings.load();
-  TG.init();
+/* ----------------------- Voice input (Web Speech API) ----------------------- */
+function startVoiceInput(target){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR) return toast("SpeechRecognition недоступен", false, 2600);
+  try{
+    const rec = new SR();
+    rec.lang = (state.tgUser?.language_code || "ru-RU");
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+    let finalText = "";
+    rec.onresult = (e)=>{
+      let s="";
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        const r=e.results[i];
+        if(r.isFinal) finalText += r[0].transcript;
+        else s += r[0].transcript;
+      }
+      target.value = (state.composing||"") + finalText + s;
+      state.composing = target.value;
+      persistAll();
+      syncTgButtons();
+    };
+    rec.onerror = ()=> toast("Ошибка распознавания", false);
+    rec.onend = ()=> toast("Голосовой ввод завершён");
+    rec.start();
+    toast("Слушаю…");
+  }catch{
+    toast("Не удалось запустить микрофон", false);
+  }
+}
 
-  // try to hydrate from CloudStorage (optional) if user enabled (we do not auto-load to avoid surprises)
+/* ----------------------- Telegram MainButton & BackButton ----------------------- */
+let backBound = false;
+let mainBound = false;
 
-  // compact mode: slightly tighter paddings
-  if (Settings.get('compact')) {
-    document.documentElement.style.setProperty('--radius', '16px');
+function syncTgButtons(){
+  if(!tg) return;
+  // MainButton: show on chat when there is text/attachments
+  try{
+    const isChat = state.route.name==="chat";
+    const canSend = ((state.composing||"").trim().length>0) || (state.attachments.length>0);
+    if(isChat && canSend){
+      tg.MainButton.setText("Отправить");
+      tg.MainButton.show();
+      tg.MainButton.enable();
+    }else{
+      tg.MainButton.hide();
+    }
+  }catch{}
+
+  // BackButton: show if not on main chat route
+  try{
+    const show = (state.route.name !== "chat") && !(state.route.name==="chat" && state.route.params.id);
+    // On TMA we use BackButton for navigation to chat
+    if(show) tg.BackButton.show();
+    else tg.BackButton.hide();
+  }catch{}
+}
+
+function bindTgButtonsOnce(){
+  if(!tg) return;
+
+  if(!backBound){
+    backBound = true;
+    tg.BackButton.onClick(()=> {
+      haptic("select");
+      if(state.drawerOpen){ closeDrawer(); return; }
+      if(state.route.name!=="chat") go("chat/"+state.activeChatId);
+      else tg.close();
+    });
   }
 
-  // first render
-  requestRender();
+  if(!mainBound){
+    mainBound = true;
+    tg.MainButton.onClick(()=> {
+      // trigger send in chat if present
+      const btn = $("#sendBtn");
+      if(btn) btn.click();
+    });
+  }
 }
 
-boot();
+/* ----------------------- Render ----------------------- */
+function renderChatLogScrollToBottom(){
+  const chatlog = $("#chatlog");
+  if(chatlog) chatlog.scrollTop = chatlog.scrollHeight;
+}
+
+function render(){
+  if(!state.ready) return;
+  ensureProject();
+
+  const root = $("#app");
+  root.innerHTML="";
+
+  const toastWrap = el("div","toast-wrap");
+  root.appendChild(toastWrap);
+
+  const backdrop = el("div","backdrop"+(state.drawerOpen?" show":""));
+  backdrop.onclick = ()=> closeDrawer();
+  root.appendChild(backdrop);
+
+  const drawer = sidebar(true);
+  if(state.drawerOpen) drawer.classList.add("open");
+  root.appendChild(drawer);
+
+  const shell = el("div","shell");
+  shell.appendChild(sidebar(false));
+
+  const main = el("div","main");
+  main.appendChild(topbar());
+
+  // content
+  main.appendChild(view());
+  shell.appendChild(main);
+  root.appendChild(shell);
+  root.appendChild(bottomNav());
+
+  // close drawer on resize/orientation
+  window.addEventListener("resize", ()=> { if(state.drawerOpen) closeDrawer(); }, {once:true});
+
+  // wire drawer open state
+  if(state.drawerOpen) setTimeout(()=> drawer.classList.add("open"), 0);
+
+  // allow clicking nav while drawer open
+  bindTgButtonsOnce();
+  syncTgButtons();
+}
+
+/* ----------------------- Init ----------------------- */
+function init(){
+  state.ready = true;
+
+  // routing
+  window.addEventListener("hashchange", ()=> setRoute(parseHash()));
+  setRoute(parseHash());
+
+  // initial data
+  ensureProject();
+
+  // no desktop hotkeys in TMA (they are useless on mobile)
+  // but keep one: Ctrl+K focuses search (web)
+  window.addEventListener("keydown",(e)=>{
+    if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==="k"){
+      e.preventDefault();
+      const i = document.querySelector(".topbar input.input");
+      if(i) i.focus();
+    }
+  });
+
+  render();
+}
+
+(async function boot(){
+  await telegramAutoInit();
+  applyThemeOverride();
+  init();
+})();
